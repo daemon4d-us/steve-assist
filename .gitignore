@@ -1,0 +1,30 @@
+/target
+
+# Secrets — never commit
+.env
+.env.prod
+.env.*.local
+
+# Ignore all JSON by default so no credential file is ever committed,
+# then explicitly allow the project's own JSON.
+*.json
+!frontend/package.json
+!frontend/package-lock.json
+!frontend/tsconfig.json
+!frontend/tsconfig.app.json
+!frontend/tsconfig.node.json
+!e2e/scenarios/*.json
+
+# Local editor / agent settings
+.claude/settings.local.json
+
+# Terraform state and vars (may contain secrets)
+terraform/.terraform/
+terraform/*.tfstate*
+terraform/.terraform.lock.hcl
+terraform/terraform.tfvars
+
+# Frontend build artifacts
+frontend/node_modules/
+frontend/dist/
+frontend/.env

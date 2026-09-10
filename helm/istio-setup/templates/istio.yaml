@@ -1,0 +1,8 @@
+apiVersion: sailoperator.io/v1
+kind: Istio
+metadata:
+  name: default
+  namespace: istio-system
+spec:
+  version: {{ .Values.istio.version }}
+  namespace: istio-system

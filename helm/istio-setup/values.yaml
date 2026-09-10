@@ -1,0 +1,12 @@
+istio:
+  version: v1.29.1
+
+gateway:
+  replicaCount: 1
+  serviceType: LoadBalancer
+
+tls:
+  enabled: true
+  host: steve.creativecaptains.com
+  acmeEmail: dsidorenko@creativecaptains.com
+  dnsProject: reply-ai-490216

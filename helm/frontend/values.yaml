@@ -1,0 +1,25 @@
+replicaCount: 1
+
+image:
+  repository: us-central1-docker.pkg.dev/steve-assist-491304/steve-assist/steve-assist-frontend
+  tag: latest
+  pullPolicy: Always
+
+service:
+  type: ClusterIP
+  port: 80
+
+gateway:
+  enabled: true
+  host: dashboard.steve.creativecaptains.com
+
+tls:
+  enabled: true
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 32Mi
+  limits:
+    cpu: 200m
+    memory: 64Mi

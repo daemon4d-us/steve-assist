@@ -1,0 +1,33 @@
+replicaCount: 1
+
+image:
+  repository: us-central1-docker.pkg.dev/steve-assist-491304/steve-assist/steve-assist
+  tag: latest
+  pullPolicy: Always
+
+service:
+  type: ClusterIP
+  port: 8080
+
+gateway:
+  enabled: true
+  host: steve.creativecaptains.com
+
+tls:
+  enabled: true
+
+# Checksum of the env ConfigMap — set by deploy.sh to trigger pod restart on config change
+envConfigChecksum: ""
+
+serviceAccount:
+  name: steve-assist
+  annotations:
+    iam.gke.io/gcp-service-account: steve-assist@steve-assist-491304.iam.gserviceaccount.com
+
+resources:
+  requests:
+    cpu: 250m
+    memory: 256Mi
+  limits:
+    cpu: "1"
+    memory: 512Mi

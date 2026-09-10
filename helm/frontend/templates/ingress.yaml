@@ -1,0 +1,60 @@
+{{- if .Values.gateway.enabled }}
+apiVersion: networking.istio.io/v1
+kind: Gateway
+metadata:
+  name: {{ .Chart.Name }}
+  namespace: istio-system
+  labels:
+    app.kubernetes.io/name: {{ .Chart.Name }}
+spec:
+  selector:
+    istio: ingressgateway
+  servers:
+    {{- if .Values.tls.enabled }}
+    - port:
+        number: 443
+        name: https
+        protocol: HTTPS
+      tls:
+        mode: SIMPLE
+        credentialName: {{ .Chart.Name }}-tls
+      hosts:
+        - {{ .Values.gateway.host | quote }}
+    - port:
+        number: 80
+        name: http
+        protocol: HTTP
+      tls:
+        httpsRedirect: true
+      hosts:
+        - {{ .Values.gateway.host | quote }}
+    {{- else }}
+    - port:
+        number: 80
+        name: http
+        protocol: HTTP
+      hosts:
+        - {{ .Values.gateway.host | default "*" | quote }}
+    {{- end }}
+---
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: {{ .Chart.Name }}
+  labels:
+    app.kubernetes.io/name: {{ .Chart.Name }}
+spec:
+  hosts:
+    - {{ .Values.gateway.host | default "*" | quote }}
+  gateways:
+    - istio-system/{{ .Chart.Name }}
+  http:
+    - match:
+        - uri:
+            prefix: /
+      route:
+        - destination:
+            host: {{ .Chart.Name }}.{{ .Release.Namespace }}.svc.cluster.local
+            port:
+              number: {{ .Values.service.port }}
+{{- end }}

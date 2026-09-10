@@ -1,0 +1,1 @@
+{{/* Certificate and ClusterIssuer are managed by the istio-setup chart */}}

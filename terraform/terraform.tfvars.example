@@ -1,0 +1,6 @@
+project_id     = "steve-assist-491304"
+region         = "us-central1"
+zone           = "us-central1-a"
+dns_zone_name  = "creativecaptains-com"  # your Cloud DNS managed zone name
+dns_project_id = "reply-ai-490216"       # GCP project hosting the Cloud DNS zone
+domain         = "steve.creativecaptains.com"

@@ -1,0 +1,14 @@
+{
+  "name": "returning-caller-greeting",
+  "caller_phone": "+16263993152",
+  "reset_caller": false,
+  "turns": [
+    { "say": "Hi Steve, it's me." },
+    { "say": "I just wanted to check in and say the new setup is working. Thanks so much." },
+    { "say": "That's all, take care." }
+  ],
+  "assertions": {
+    "greeting_contains": "Jeremy",
+    "summary_present": true
+  }
+}

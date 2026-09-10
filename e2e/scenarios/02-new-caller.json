@@ -1,0 +1,14 @@
+{
+  "name": "new-caller-asks-name",
+  "caller_phone": "+15551230001",
+  "reset_caller": true,
+  "turns": [
+    { "say": "Hello there." },
+    { "say": "My name is Alex Turner." },
+    { "say": "I was just testing the system. Goodbye." }
+  ],
+  "assertions": {
+    "caller_created": true,
+    "summary_present": true
+  }
+}
