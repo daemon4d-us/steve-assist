@@ -1,0 +1,8 @@
+# Caddy terminates TLS for the phone service and reverse-proxies to Steve.
+# WebSockets (Twilio /media-stream) pass through reverse_proxy unchanged.
+# The domain and ACME email come from environment variables set in compose.
+{$STEVE_DOMAIN} {
+	encode zstd gzip
+	reverse_proxy steve:8080
+	tls {$ACME_EMAIL}
+}

@@ -1,0 +1,38 @@
+# Deploys the Steve backend behind Caddy (auto-TLS) on a single Nebius VM.
+# Run from the repo root on the VM:
+#   docker compose -f deploy/nebius/docker-compose.yml up -d --build
+services:
+  steve:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file:
+      - /opt/steve/.env
+    environment:
+      # Firestore service-account key, mounted read-only below.
+      GOOGLE_APPLICATION_CREDENTIALS: /run/secrets/gcp-sa.json
+    volumes:
+      - /opt/steve/gcp-sa.json:/run/secrets/gcp-sa.json:ro
+    expose:
+      - "8080"
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    depends_on:
+      - steve
+    environment:
+      STEVE_DOMAIN: ${STEVE_DOMAIN:?set STEVE_DOMAIN}
+      ACME_EMAIL: ${ACME_EMAIL:?set ACME_EMAIL}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  caddy_data:
+  caddy_config:
