@@ -25,13 +25,21 @@ async fn main() {
         services::scheduler::run(scheduler_state).await;
     });
 
+    // Browser origin of the dashboard frontend; each deployment (Cloud Run, Nebius VM)
+    // serves its dashboard from a different host.
+    let dashboard_origin = std::env::var("DASHBOARD_ORIGIN")
+        .unwrap_or_else(|_| "https://dashboard.steve.creativecaptains.com".to_string());
     let cors = CorsLayer::new()
-        .allow_origin(AllowOrigin::exact(
-            "https://dashboard.steve.creativecaptains.com"
-                .parse()
-                .unwrap(),
-        ))
-        .allow_methods([Method::GET, Method::PUT, Method::POST, Method::DELETE, Method::OPTIONS])
+        .allow_origin(AllowOrigin::exact(dashboard_origin.parse().unwrap_or_else(
+            |e| panic!("invalid DASHBOARD_ORIGIN {dashboard_origin:?}: {e}"),
+        )))
+        .allow_methods([
+            Method::GET,
+            Method::PUT,
+            Method::POST,
+            Method::DELETE,
+            Method::OPTIONS,
+        ])
         .allow_headers([
             HeaderName::from_static("content-type"),
             HeaderName::from_static("authorization"),
@@ -54,8 +62,14 @@ async fn main() {
                 .put(handlers::api::update_assignment)
                 .delete(handlers::api::delete_assignment),
         )
-        .route("/api/calendar/status", get(handlers::api::list_calendar_status))
-        .route("/api/calendar/reauth", post(handlers::api::calendar_reauth_url))
+        .route(
+            "/api/calendar/status",
+            get(handlers::api::list_calendar_status),
+        )
+        .route(
+            "/api/calendar/reauth",
+            post(handlers::api::calendar_reauth_url),
+        )
         .route("/api/bot-groups", get(handlers::api::list_bot_groups))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
@@ -63,12 +77,24 @@ async fn main() {
         ));
 
     let app = Router::new()
-        .route("/incoming-call", post(handlers::incoming_call::incoming_call))
+        .route(
+            "/incoming-call",
+            post(handlers::incoming_call::incoming_call),
+        )
         .route("/media-stream", any(handlers::media_stream::media_stream))
-        .route("/outbound-call", post(handlers::outbound_call::outbound_call))
-        .route("/outbound-call-status", post(handlers::outbound_call::outbound_call_status))
+        .route(
+            "/outbound-call",
+            post(handlers::outbound_call::outbound_call),
+        )
+        .route(
+            "/outbound-call-status",
+            post(handlers::outbound_call::outbound_call_status),
+        )
         .route("/auth/google/start", get(handlers::google_auth::start))
-        .route("/auth/google/callback", get(handlers::google_auth::callback))
+        .route(
+            "/auth/google/callback",
+            get(handlers::google_auth::callback),
+        )
         .merge(api_routes)
         .with_state(state)
         .layer(cors);

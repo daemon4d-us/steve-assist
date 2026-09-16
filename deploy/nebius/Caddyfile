@@ -1,8 +1,21 @@
 # Caddy terminates TLS for the phone service and reverse-proxies to Steve.
 # WebSockets (Twilio /media-stream) pass through reverse_proxy unchanged.
-# The domain and ACME email come from environment variables set in compose.
+# The domains and ACME email come from environment variables set in compose.
 {$STEVE_DOMAIN} {
 	encode zstd gzip
 	reverse_proxy steve:8080
+	tls {$ACME_EMAIL}
+}
+
+# Dashboard frontend (static React app served by nginx in the frontend container).
+{$DASHBOARD_DOMAIN} {
+	encode zstd gzip
+	# Google OAuth callback lives in the backend; GOOGLE_OAUTH_REDIRECT_URI points here.
+	handle /auth/google/* {
+		reverse_proxy steve:8080
+	}
+	handle {
+		reverse_proxy frontend:80
+	}
 	tls {$ACME_EMAIL}
 }

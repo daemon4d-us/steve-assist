@@ -1,4 +1,6 @@
-# Deploys the Steve backend behind Caddy (auto-TLS) on a single Nebius VM.
+# Deploys the Steve backend and dashboard frontend behind Caddy (auto-TLS) on a single Nebius VM.
+# Compose-level vars (STEVE_DOMAIN, DASHBOARD_DOMAIN, ACME_EMAIL, VITE_GOOGLE_CLIENT_ID)
+# come from deploy/nebius/.env next to this file or the shell environment.
 # Run from the repo root on the VM:
 #   docker compose -f deploy/nebius/docker-compose.yml up -d --build
 services:
@@ -17,13 +19,26 @@ services:
     expose:
       - "8080"
 
+  frontend:
+    build:
+      context: ../../frontend
+      args:
+        # Baked into the static bundle at build time.
+        VITE_GOOGLE_CLIENT_ID: ${VITE_GOOGLE_CLIENT_ID:?set VITE_GOOGLE_CLIENT_ID}
+        VITE_API_BASE_URL: https://${STEVE_DOMAIN:?set STEVE_DOMAIN}
+    restart: unless-stopped
+    expose:
+      - "80"
+
   caddy:
     image: caddy:2
     restart: unless-stopped
     depends_on:
       - steve
+      - frontend
     environment:
       STEVE_DOMAIN: ${STEVE_DOMAIN:?set STEVE_DOMAIN}
+      DASHBOARD_DOMAIN: ${DASHBOARD_DOMAIN:?set DASHBOARD_DOMAIN}
       ACME_EMAIL: ${ACME_EMAIL:?set ACME_EMAIL}
     ports:
       - "80:80"
