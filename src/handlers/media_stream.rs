@@ -82,8 +82,10 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
                         *stream_sid.lock().await = Some(sid);
                         *call_sid.lock().await = Some(start.call_sid.clone());
 
-                        // Check if this is an outbound call (assignment)
-                        let is_outbound = start.custom_parameters.contains_key("assignmentId");
+                        // Outbound call: a scheduler assignment (assignmentId) or a call the
+                        // Bluetooth bridge placed / attached to with an objective.
+                        let is_outbound = start.custom_parameters.contains_key("assignmentId")
+                            || start.custom_parameters.contains_key("objective");
                         *is_outbound_call.lock().await = is_outbound;
 
                         if is_outbound {

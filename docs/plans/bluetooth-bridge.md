@@ -199,3 +199,21 @@ then speaks. Worth a prompt/stop-sequence fix in `assistant.rs`.
   Claude provider the profile model must be changed to a Claude id first. The
   local server also runs the outbound scheduler against the shared Firestore,
   so two servers can race on pending assignments.
+
+## Outgoing calls (2026-09-16)
+
+Steve can now be on calls the phone places, not only ones it receives:
+
+- `steve-bridge dial <number> <objective...>` asks the phone to dial via
+  `org.ofono.VoiceCallManager.Dial`, waits for the call to go `active`, then
+  runs the usual session with `customParameters { objective, contactPhone,
+  direction: "outgoing" }`. The server treats a start event with an
+  `objective` like a scheduler assignment (outbound prompt, outbound greeting,
+  `direction = "outbound"`), so Steve pursues the objective with whoever
+  answers. This places calls from the personal number with no Twilio leg.
+- Calls the user dials on the phone are left alone unless
+  `BRIDGE_OBJECTIVE_FILE` (default `~/.config/steve-bridge/objective.txt`)
+  holds an objective; then Steve joins that call and the file is renamed to
+  `.used`, so only that one call is taken over.
+- Incoming handling is unchanged (answer after `BRIDGE_ANSWER_DELAY_MS`,
+  unless the human picked up first).

@@ -19,6 +19,25 @@ pub type BoxError = Box<dyn std::error::Error + Send + Sync>;
 type Ws =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
+/// What kind of call Steve is joining; decides the server-side prompt.
+#[derive(Clone, Debug)]
+pub enum CallKind {
+    /// Someone called the phone: Steve answers as the assistant.
+    Incoming,
+    /// The phone placed the call (dialed by the user or by `steve-bridge dial`):
+    /// Steve pursues `objective` with whoever answers, like an assignment.
+    Outgoing { objective: String },
+}
+
+#[derive(Clone, Debug)]
+pub struct CallParams {
+    /// The other party's number (caller id, or the number dialed).
+    pub phone: String,
+    /// oFono call path or "loopback"; only for logs.
+    pub label: String,
+    pub kind: CallKind,
+}
+
 /// Local server first; the cloud deployment if it does not answer in time.
 async fn connect_with_fallback(cfg: &Config) -> Result<(Ws, &'static str), BoxError> {
     match tokio::time::timeout(
@@ -49,27 +68,31 @@ fn short_id() -> String {
 /// stream, or the capture pipe ends.
 pub async fn bridge_call(
     cfg: &Config,
-    caller_phone: &str,
-    call_label: &str,
+    params: &CallParams,
     targets: AudioTargets,
     mut end_rx: watch::Receiver<bool>,
 ) -> Result<(), BoxError> {
     let (mut ws, which) = connect_with_fallback(cfg).await?;
     let stream_sid = format!("MZbt{}", short_id());
     let call_sid = format!("BT{}", short_id());
-    info!(server = which, %call_sid, caller = %caller_phone, "stream starting");
+    info!(server = which, %call_sid, phone = %params.phone, kind = ?params.kind, "stream starting");
 
     ws.send(Message::Text(
         json!({"event": "connected", "protocol": "Call", "version": "1.0.0"}).to_string(),
     ))
     .await?;
-    let mut params = json!({
-        "callerPhone": caller_phone,
+    let mut custom = json!({
+        "callerPhone": params.phone,
         "source": "bluetooth",
-        "bridgeCall": call_label,
+        "bridgeCall": params.label,
     });
+    if let CallKind::Outgoing { objective } = &params.kind {
+        custom["direction"] = Value::String("outgoing".into());
+        custom["objective"] = Value::String(objective.clone());
+        custom["contactPhone"] = Value::String(params.phone.clone());
+    }
     if let Some(t) = &cfg.token {
-        params["token"] = Value::String(t.clone());
+        custom["token"] = Value::String(t.clone());
     }
     ws.send(Message::Text(
         json!({
@@ -78,7 +101,7 @@ pub async fn bridge_call(
             "start": {
                 "callSid": call_sid,
                 "tracks": ["inbound"],
-                "customParameters": params
+                "customParameters": custom
             }
         })
         .to_string(),
