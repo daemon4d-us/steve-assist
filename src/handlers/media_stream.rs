@@ -457,6 +457,7 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
         let state = state.clone();
         async move {
             let mut turn_index: u32 = 0;
+            let mut consecutive_farewells: u32 = 0;
             while let Some(transcript) = transcript_rx.recv().await {
                 let turn_started = std::time::Instant::now();
                 turn_index += 1;
@@ -566,6 +567,26 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
                 tracing::info!("Assistant: {ai_response}");
 
                 // Extract DTMF commands from response
+                // Hang-up decision: the tool, or (fallbacks for models that end the
+                // call in words) a verbal hang-up marker, or two farewells in a row.
+                let verbal_hangup = call_control::text_signals_hangup(&ai_response);
+                if call_control::is_farewell(&ai_response) || verbal_hangup {
+                    consecutive_farewells += 1;
+                } else {
+                    consecutive_farewells = 0;
+                }
+                let hang_up = turn.hang_up || verbal_hangup || consecutive_farewells >= 2;
+                if hang_up && !turn.hang_up {
+                    tracing::info!(
+                        "Hang-up fallback for {csid}: verbal_marker={verbal_hangup} consecutive_farewells={consecutive_farewells}"
+                    );
+                }
+                let ai_response = if verbal_hangup {
+                    call_control::strip_hangup_markers(&ai_response)
+                } else {
+                    ai_response
+                };
+
                 let (spoken_text, dtmf_commands) = dtmf::extract_dtmf_commands(&ai_response);
 
                 if !dtmf_commands.is_empty() {
@@ -668,7 +689,7 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
                 // the stream. Closing ends a <Connect><Stream> call on Twilio and
                 // makes the Bluetooth bridge hang up; for Twilio also ask the REST
                 // API, so the call cannot linger if the stream close is missed.
-                if turn.hang_up {
+                if hang_up {
                     let delay = call_control::playout_delay(audio_bytes);
                     tracing::info!(
                         "Ending call {csid} after farewell ({} ms playout)",
@@ -698,9 +719,25 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
         }
     };
 
+    let max_call = call_control::max_call_duration();
     tokio::select! {
         _ = twilio_task => tracing::info!("Twilio task ended"),
         _ = speech_task => tracing::info!("Speech task ended"),
+        _ = tokio::time::sleep(max_call) => {
+            tracing::warn!("Call exceeded MAX_CALL_SECONDS ({}s); ending it", max_call.as_secs());
+            let mut sink = twilio_sink.lock().await;
+            let _ = sink.send(Message::Close(None)).await;
+            if let Some(csid) = call_sid.lock().await.clone()
+                && call_control::is_twilio_call(&csid)
+            {
+                let (acct, tok) = (state.twilio_account_sid.clone(), state.twilio_auth_token.clone());
+                tokio::spawn(async move {
+                    if let Err(e) = call_control::twilio_hangup(&acct, &tok, &csid).await {
+                        tracing::warn!("Twilio hangup for {csid} failed: {e}");
+                    }
+                });
+            }
+        }
     }
 
     // End-of-call processing
