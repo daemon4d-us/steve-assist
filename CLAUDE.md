@@ -20,6 +20,8 @@ cargo fmt -- --check # Check formatting without modifying
 
 Requires a `.env` file with: `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `GOOGLE_APPLICATION_CREDENTIALS` (path to service account JSON), `GCP_PROJECT_ID`, `LLM_PROVIDER` (`claude` or `nemotron`) with the matching `ANTHROPIC_API_KEY` or `NEBIUS_API_KEY`, `ELEVENLABS_API_KEY`, `ELEVENLABS_VOICE_ID`, `SERVER_PORT` (default 8080), `MEMORY_DEPTH` (default 5).
 
+Deploy to the Nebius VM with `deploy/nebius/redeploy.sh` (pushes main, pulls on the VM, rebuilds only the services whose sources changed, reloads Caddy if its config changed, then health-checks both hosts; `--status` only reports, `--all` rebuilds everything, `--no-push` skips the push).
+
 For local dev, use `ngrok http 8080` and set the Twilio webhook to `https://<ngrok-id>.ngrok.io/incoming-call`.
 
 ## Architecture
