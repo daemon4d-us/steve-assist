@@ -6,7 +6,7 @@ use axum::response::IntoResponse;
 use futures_util::{SinkExt, StreamExt};
 use tokio::sync::Mutex;
 
-use crate::services::{assistant, calendar_tools, db, elevenlabs, llm, speech};
+use crate::services::{assistant, calendar_tools, call_control, db, elevenlabs, llm, speech};
 use crate::state::AppState;
 use crate::twilio::{audio, dtmf, messages as twilio_msg};
 
@@ -535,7 +535,8 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
                 }
 
                 // Tool-use loop: ask the LLM, execute any tool calls, loop until only text
-                let tools = calendar_tools::available_tools(&state).await;
+                let mut tools = calendar_tools::available_tools(&state).await;
+                tools.push(call_control::end_call_tool());
                 let phone_for_tools = caller_phone.lock().await.clone().unwrap_or_default();
 
                 let turn = match run_tool_loop(
@@ -661,6 +662,37 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
                             break;
                         }
                     }
+                }
+
+                // The model ended the call: let the farewell play out, then close
+                // the stream. Closing ends a <Connect><Stream> call on Twilio and
+                // makes the Bluetooth bridge hang up; for Twilio also ask the REST
+                // API, so the call cannot linger if the stream close is missed.
+                if turn.hang_up {
+                    let delay = call_control::playout_delay(audio_bytes);
+                    tracing::info!(
+                        "Ending call {csid} after farewell ({} ms playout)",
+                        delay.as_millis()
+                    );
+                    tokio::time::sleep(delay).await;
+                    if let Err(e) = sink.send(Message::Close(None)).await {
+                        tracing::warn!("Failed to close stream: {e}");
+                    }
+                    if call_control::is_twilio_call(&csid) {
+                        let (sid_acct, tok) = (
+                            state.twilio_account_sid.clone(),
+                            state.twilio_auth_token.clone(),
+                        );
+                        let csid = csid.clone();
+                        tokio::spawn(async move {
+                            if let Err(e) =
+                                call_control::twilio_hangup(&sid_acct, &tok, &csid).await
+                            {
+                                tracing::warn!("Twilio hangup for {csid} failed: {e}");
+                            }
+                        });
+                    }
+                    break;
                 }
             }
         }
@@ -877,6 +909,8 @@ fn strip_markdown(input: &str) -> String {
 /// Result of one assistant turn: the spoken text plus accounting for metrics.
 struct TurnOutput {
     text: String,
+    /// The model called `end_call`: hang up once this turn's audio has played.
+    hang_up: bool,
     input_tokens: u32,
     output_tokens: u32,
     tool_rounds: u32,
@@ -895,6 +929,7 @@ async fn run_tool_loop(
     const MAX_ROUNDS: usize = 4;
     let mut input_tokens = 0u32;
     let mut output_tokens = 0u32;
+    let mut hang_up = false;
 
     let ctx = calendar_tools::ToolContext {
         state,
@@ -927,6 +962,7 @@ async fn run_tool_loop(
                 .push(llm::Message::assistant_text(completion.text.clone()));
             return Ok(TurnOutput {
                 text: completion.text,
+                hang_up,
                 input_tokens,
                 output_tokens,
                 tool_rounds: round as u32,
@@ -937,7 +973,16 @@ async fn run_tool_loop(
         let mut results = Vec::with_capacity(completion.tool_calls.len());
         for call in &completion.tool_calls {
             tracing::info!("Executing tool: {} input={}", call.name, call.input);
-            let output = calendar_tools::dispatch(&ctx, &call.name, &call.input).await;
+            let output = if call.name == call_control::END_CALL_TOOL {
+                tracing::info!(
+                    "Model requested end of call {call_sid}: {}",
+                    call_control::end_call_reason(&call.input)
+                );
+                hang_up = true;
+                call_control::end_call_result()
+            } else {
+                calendar_tools::dispatch(&ctx, &call.name, &call.input).await
+            };
             results.push(llm::ToolResult {
                 call_id: call.id.clone(),
                 name: call.name.clone(),

@@ -4,6 +4,7 @@
 use chrono::{DateTime, Utc};
 use chrono_tz::Tz;
 
+use crate::services::call_control::END_CALL_PROMPT;
 use crate::services::db::{self, AgentProfile};
 use crate::services::llm::{Completion, CompletionRequest, LlmError, LlmProvider, Message, Tool};
 
@@ -29,6 +30,8 @@ pub fn build_system_prompt(
 ) -> String {
     let mut prompt = profile.base_prompt.clone();
     prompt.push_str(&current_time_line(profile, Utc::now()));
+    prompt.push_str(END_CALL_PROMPT);
+    prompt.push('\n');
 
     match caller_name {
         Some(name) => {
@@ -71,6 +74,8 @@ pub fn build_outbound_prompt(
 ) -> String {
     let mut prompt = profile.base_prompt.clone();
     prompt.push_str(&current_time_line(profile, Utc::now()));
+    prompt.push_str(END_CALL_PROMPT);
+    prompt.push('\n');
     let name_str = contact_name.unwrap_or("the person");
 
     prompt.push_str(

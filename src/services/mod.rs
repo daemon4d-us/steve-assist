@@ -1,5 +1,6 @@
 pub mod assistant;
 pub mod calendar_tools;
+pub mod call_control;
 pub mod db;
 pub mod deepgram;
 pub mod elevenlabs;
