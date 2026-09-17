@@ -1,8 +1,24 @@
 //! Steve's "brain": prompt composition and the LLM-backed tasks the call loop
 //! needs. Everything here is provider-neutral and goes through [`LlmProvider`].
 
+use chrono::{DateTime, Utc};
+use chrono_tz::Tz;
+
 use crate::services::db::{self, AgentProfile};
 use crate::services::llm::{Completion, CompletionRequest, LlmError, LlmProvider, Message, Tool};
+
+/// The model has no clock: without this it guesses the date when asked and
+/// cannot reason about "tomorrow" for calendar tools. Rendered in the
+/// profile's time zone (UTC if the profile's zone does not parse).
+fn current_time_line(profile: &AgentProfile, now: DateTime<Utc>) -> String {
+    let tz: Tz = profile.timezone.parse().unwrap_or(chrono_tz::UTC);
+    let local = now.with_timezone(&tz);
+    format!(
+        "\n\nThe current date and time is {} ({}). Use this for anything involving dates, days of the week, or scheduling.\n",
+        local.format("%A, %B %-d, %Y, %-I:%M %p"),
+        tz.name()
+    )
+}
 
 /// Build a dynamic system prompt based on caller identity and memories.
 pub fn build_system_prompt(
@@ -12,6 +28,7 @@ pub fn build_system_prompt(
     memories: &[db::Memory],
 ) -> String {
     let mut prompt = profile.base_prompt.clone();
+    prompt.push_str(&current_time_line(profile, Utc::now()));
 
     match caller_name {
         Some(name) => {
@@ -53,6 +70,7 @@ pub fn build_outbound_prompt(
     contact_phone: &str,
 ) -> String {
     let mut prompt = profile.base_prompt.clone();
+    prompt.push_str(&current_time_line(profile, Utc::now()));
     let name_str = contact_name.unwrap_or("the person");
 
     prompt.push_str(
@@ -250,4 +268,53 @@ pub async fn extract_memories(
         .collect();
 
     Ok(facts)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::TimeZone;
+
+    fn profile(timezone: &str) -> AgentProfile {
+        serde_json::from_value(serde_json::json!({
+            "base_prompt": "You are Steve.",
+            "new_caller_prompt": " New caller {phone}.",
+            "returning_caller_prompt": " Returning {name} {phone}.",
+            "memory_prompt": " Memories for {name}: {memories}",
+            "model": "test-model",
+            "max_tokens": 100,
+            "timezone": timezone
+        }))
+        .expect("valid profile")
+    }
+
+    #[test]
+    fn current_time_line_uses_profile_timezone() {
+        let now = Utc.with_ymd_and_hms(2026, 9, 17, 1, 5, 0).unwrap();
+        let line = current_time_line(&profile("America/Los_Angeles"), now);
+        assert!(
+            line.contains("Wednesday, September 16, 2026, 6:05 PM (America/Los_Angeles)"),
+            "{line}"
+        );
+    }
+
+    #[test]
+    fn current_time_line_falls_back_to_utc() {
+        let now = Utc.with_ymd_and_hms(2026, 9, 17, 1, 5, 0).unwrap();
+        let line = current_time_line(&profile("Not/AZone"), now);
+        assert!(
+            line.contains("Thursday, September 17, 2026, 1:05 AM (UTC)"),
+            "{line}"
+        );
+    }
+
+    #[test]
+    fn prompts_include_the_date_line() {
+        let p = profile("UTC");
+        let inbound = build_system_prompt(&p, "+15551234567", None, &[]);
+        let outbound = build_outbound_prompt(&p, "say hi", Some("Ann"), "+15551234567");
+        assert!(inbound.starts_with("You are Steve.\n\nThe current date and time is "));
+        assert!(outbound.starts_with("You are Steve.\n\nThe current date and time is "));
+        assert!(inbound.ends_with(" New caller +15551234567."));
+    }
 }
