@@ -105,6 +105,8 @@ pub struct Completion {
     pub text: String,
     pub tool_calls: Vec<ToolCall>,
     pub usage: Option<Usage>,
+    /// The reply was cut off by `max_tokens` rather than finished by the model.
+    pub truncated: bool,
 }
 
 #[async_trait]

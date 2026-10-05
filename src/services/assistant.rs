@@ -1,12 +1,24 @@
 //! Steve's "brain": prompt composition and the LLM-backed tasks the call loop
 //! needs. Everything here is provider-neutral and goes through [`LlmProvider`].
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Days, Utc};
 use chrono_tz::Tz;
 
 use crate::services::call_control::END_CALL_PROMPT;
 use crate::services::db::{self, AgentProfile};
 use crate::services::llm::{Completion, CompletionRequest, LlmError, LlmProvider, Message, Tool};
+
+/// Reply text goes straight to TTS. Nemotron in particular, with reasoning
+/// switched off, otherwise plans out loud ("Let me use the check_availability
+/// tool. In ISO format: ...") and the caller hears all of it.
+const SPOKEN_ONLY_PROMPT: &str = " Everything you write is spoken aloud to the caller, so write only what you would say to them: never narrate your reasoning, your plan, date arithmetic, tool names or timestamps. When you need a tool, call it right away in the same turn instead of announcing or describing it.";
+
+/// Appended to the system prompt when a reply ran into `max_tokens` without
+/// reaching a tool call, for the single retry of that turn.
+pub const NO_NARRATION_RETRY: &str = "\n\nIMPORTANT: your previous attempt at this reply was discarded because it narrated your reasoning and ran too long. Do not explain your steps. Either call the tool you need now with no accompanying text, or answer the caller in one or two short sentences.";
+
+/// How many days, starting today, the system prompt lists by weekday and date.
+const UPCOMING_DAYS: u64 = 14;
 
 /// The model has no clock: without this it guesses the date when asked and
 /// cannot reason about "tomorrow" for calendar tools. Rendered in the
@@ -14,10 +26,27 @@ use crate::services::llm::{Completion, CompletionRequest, LlmError, LlmProvider,
 fn current_time_line(profile: &AgentProfile, now: DateTime<Utc>) -> String {
     let tz: Tz = profile.timezone.parse().unwrap_or(chrono_tz::UTC);
     let local = now.with_timezone(&tz);
+    // Models miscount from today's date to a weekday ("Friday, October 11"
+    // for a Sunday), so spell the coming days out instead of leaving the
+    // arithmetic to them.
+    let upcoming = (0..UPCOMING_DAYS)
+        .map(|i| {
+            let day = local.date_naive() + Days::new(i);
+            let label = match i {
+                0 => " (today)",
+                1 => " (tomorrow)",
+                _ => "",
+            };
+            format!("- {}{}", day.format("%A, %B %-d"), label)
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
     format!(
-        "\n\nThe current date and time is {} ({}). Use this for anything involving dates, days of the week, or scheduling.\n",
+        "\n\nThe current date and time is {} ({}). Use this for anything involving dates, days of the week, or scheduling.\n\
+         Never work out the date of a day of the week yourself. Read it from this list of the coming days:\n{}\n",
         local.format("%A, %B %-d, %Y, %-I:%M %p"),
-        tz.name()
+        tz.name(),
+        upcoming
     )
 }
 
@@ -31,6 +60,7 @@ pub fn build_system_prompt(
     let mut prompt = profile.base_prompt.clone();
     prompt.push_str(&current_time_line(profile, Utc::now()));
     prompt.push_str(END_CALL_PROMPT);
+    prompt.push_str(SPOKEN_ONLY_PROMPT);
     prompt.push('\n');
 
     match caller_name {
@@ -75,6 +105,7 @@ pub fn build_outbound_prompt(
     let mut prompt = profile.base_prompt.clone();
     prompt.push_str(&current_time_line(profile, Utc::now()));
     prompt.push_str(END_CALL_PROMPT);
+    prompt.push_str(SPOKEN_ONLY_PROMPT);
     prompt.push('\n');
     let name_str = contact_name.unwrap_or("the person");
 
@@ -314,6 +345,18 @@ mod tests {
     }
 
     #[test]
+    fn current_time_line_lists_the_coming_days() {
+        let now = Utc.with_ymd_and_hms(2026, 10, 5, 20, 50, 0).unwrap();
+        let line = current_time_line(&profile("America/Los_Angeles"), now);
+        assert!(line.contains("- Monday, October 5 (today)\n"), "{line}");
+        assert!(line.contains("- Tuesday, October 6 (tomorrow)\n"), "{line}");
+        assert!(line.contains("- Friday, October 9\n"), "{line}");
+        assert!(line.contains("- Sunday, October 11\n"), "{line}");
+        assert!(line.contains("- Sunday, October 18\n"), "{line}");
+        assert!(!line.contains("October 19"), "{line}");
+    }
+
+    #[test]
     fn prompts_include_the_date_line() {
         let p = profile("UTC");
         let inbound = build_system_prompt(&p, "+15551234567", None, &[]);
@@ -321,5 +364,7 @@ mod tests {
         assert!(inbound.starts_with("You are Steve.\n\nThe current date and time is "));
         assert!(outbound.starts_with("You are Steve.\n\nThe current date and time is "));
         assert!(inbound.ends_with(" New caller +15551234567."));
+        assert!(inbound.contains(SPOKEN_ONLY_PROMPT));
+        assert!(outbound.contains(SPOKEN_ONLY_PROMPT));
     }
 }

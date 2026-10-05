@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use chrono::{DateTime, Datelike, Duration, TimeZone, Timelike, Utc};
+use chrono::{DateTime, Datelike, Days, Duration, TimeZone, Timelike, Utc, Weekday};
 use chrono_tz::Tz;
 use serde_json::{Value, json};
 
@@ -39,6 +39,10 @@ fn build_tool_definitions() -> Vec<crate::services::llm::Tool> {
                     "end": {
                         "type": "string",
                         "description": "Window end as ISO-8601 datetime with timezone offset"
+                    },
+                    "start_weekday": {
+                        "type": "string",
+                        "description": "Day of the week the caller asked for, e.g. Friday. The call is rejected if start does not fall on that day"
                     }
                 },
                 "required": ["start", "end"]
@@ -91,6 +95,10 @@ fn build_tool_definitions() -> Vec<crate::services::llm::Tool> {
                         "type": "string",
                         "description": "Event end as ISO-8601 datetime with offset"
                     },
+                    "start_weekday": {
+                        "type": "string",
+                        "description": "Day of the week the caller asked for, e.g. Friday. The call is rejected if start does not fall on that day"
+                    },
                     "description": {
                         "type": "string",
                         "description": "Optional event description / context"
@@ -100,7 +108,7 @@ fn build_tool_definitions() -> Vec<crate::services::llm::Tool> {
                         "description": "Optional caller email address to invite"
                     }
                 },
-                "required": ["title", "start", "end"]
+                "required": ["title", "start", "end", "start_weekday"]
             }),
         },
     ]
@@ -134,6 +142,8 @@ pub async fn dispatch(ctx: &ToolContext<'_>, name: &str, input: &Value) -> Value
 async fn check_availability(ctx: &ToolContext<'_>, input: &Value) -> Result<Value, String> {
     let start = parse_dt(input, "start")?;
     let end = parse_dt(input, "end")?;
+    let tz: Tz = ctx.profile.timezone.parse().unwrap_or(chrono_tz::UTC);
+    check_weekday(input, start, tz, Utc::now())?;
     let cfg = ctx
         .state
         .google_oauth
@@ -150,7 +160,6 @@ async fn check_availability(ctx: &ToolContext<'_>, input: &Value) -> Result<Valu
     .await
     .map_err(|e| e.to_string())?;
 
-    let tz: Tz = ctx.profile.timezone.parse().unwrap_or(chrono_tz::UTC);
     let busy_json: Vec<Value> = busy
         .into_iter()
         .map(|b| {
@@ -163,6 +172,7 @@ async fn check_availability(ctx: &ToolContext<'_>, input: &Value) -> Result<Valu
 
     Ok(json!({
         "timezone": ctx.profile.timezone,
+        "window_start": spoken_dt(start, tz),
         "busy": busy_json,
     }))
 }
@@ -326,6 +336,8 @@ async fn book_meeting(ctx: &ToolContext<'_>, input: &Value) -> Result<Value, Str
         .to_string();
     let start = parse_dt(input, "start")?;
     let end = parse_dt(input, "end")?;
+    let tz: Tz = ctx.profile.timezone.parse().unwrap_or(chrono_tz::UTC);
+    check_weekday(input, start, tz, Utc::now())?;
     let description = input
         .get("description")
         .and_then(|v| v.as_str())
@@ -398,10 +410,54 @@ async fn book_meeting(ctx: &ToolContext<'_>, input: &Value) -> Result<Value, Str
 
     Ok(json!({
         "status": "booked",
+        "when": spoken_dt(start, tz),
         "event_id": booked.id,
         "html_link": booked.html_link,
         "invited": attendee_email.is_some(),
     }))
+}
+
+/// A tool-result date the model can read back to the caller as is, weekday
+/// included, so it never has to derive one from an ISO timestamp.
+fn spoken_dt(dt: DateTime<Utc>, tz: Tz) -> String {
+    dt.with_timezone(&tz)
+        .format("%A, %B %-d, %Y, %-I:%M %p")
+        .to_string()
+}
+
+/// Models miscount days of the week (a meeting asked for "Friday" was booked
+/// on Sunday the 11th and announced as "Friday, October 11th"). When the tool
+/// call names the weekday the caller asked for, refuse a `start` that falls on
+/// another day and hand back the date that weekday really is.
+fn check_weekday(
+    input: &Value,
+    start: DateTime<Utc>,
+    tz: Tz,
+    now: DateTime<Utc>,
+) -> Result<(), String> {
+    let Some(wanted) = input
+        .get("start_weekday")
+        .and_then(|v| v.as_str())
+        .and_then(|s| s.trim().parse::<Weekday>().ok())
+    else {
+        return Ok(());
+    };
+    let local = start.with_timezone(&tz);
+    if local.weekday() == wanted {
+        return Ok(());
+    }
+    let today = now.with_timezone(&tz).date_naive();
+    let ahead = (7 + wanted.num_days_from_monday() - today.weekday().num_days_from_monday()) % 7;
+    let next = today + Days::new(u64::from(ahead));
+    Err(format!(
+        "{} is a {}, not a {}. The next {} is {}. Nothing was checked or booked. \
+         Use that date instead, and tell the caller the correct date.",
+        local.format("%B %-d, %Y"),
+        local.format("%A"),
+        next.format("%A"),
+        next.format("%A"),
+        next.format("%B %-d, %Y (%Y-%m-%d)"),
+    ))
 }
 
 fn parse_dt(input: &Value, key: &str) -> Result<DateTime<Utc>, String> {
@@ -468,4 +524,64 @@ pub fn build_calendar_context(profile: &AgentProfile, tools_available: bool) -> 
         working_days_str,
         rules
     )
+}
+
+#[cfg(test)]
+mod weekday_tests {
+    use super::*;
+
+    fn at(y: i32, m: u32, d: u32, h: u32) -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(y, m, d, h, 0, 0).unwrap()
+    }
+
+    #[test]
+    fn rejects_a_start_on_the_wrong_weekday() {
+        let tz = chrono_tz::America::Los_Angeles;
+        // Monday Oct 5; the model asks for "Friday" but passes Sunday Oct 11, 2 PM PT.
+        let err = check_weekday(
+            &json!({ "start_weekday": "Friday" }),
+            at(2026, 10, 11, 21),
+            tz,
+            at(2026, 10, 5, 20),
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("October 11, 2026 is a Sunday, not a Friday"),
+            "{err}"
+        );
+        assert!(
+            err.contains("The next Friday is October 9, 2026 (2026-10-09)"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn accepts_a_matching_or_missing_weekday() {
+        let tz = chrono_tz::America::Los_Angeles;
+        let start = at(2026, 10, 9, 21);
+        let now = at(2026, 10, 5, 20);
+        assert!(check_weekday(&json!({ "start_weekday": " friday " }), start, tz, now).is_ok());
+        assert!(check_weekday(&json!({}), start, tz, now).is_ok());
+        assert!(check_weekday(&json!({ "start_weekday": "someday" }), start, tz, now).is_ok());
+    }
+
+    #[test]
+    fn weekday_is_judged_in_the_profile_timezone() {
+        // 2026-10-10 02:00 UTC is still Friday evening in Los Angeles.
+        let tz = chrono_tz::America::Los_Angeles;
+        let now = at(2026, 10, 5, 20);
+        assert!(
+            check_weekday(
+                &json!({ "start_weekday": "Friday" }),
+                at(2026, 10, 10, 2),
+                tz,
+                now
+            )
+            .is_ok()
+        );
+        assert_eq!(
+            spoken_dt(at(2026, 10, 10, 2), tz),
+            "Friday, October 9, 2026, 7:00 PM"
+        );
+    }
 }

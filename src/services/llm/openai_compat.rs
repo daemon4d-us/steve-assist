@@ -230,6 +230,10 @@ impl LlmProvider for OpenAiCompatProvider {
             text,
             tool_calls,
             usage,
+            truncated: resp
+                .pointer("/choices/0/finish_reason")
+                .and_then(|v| v.as_str())
+                == Some("length"),
         })
     }
 }

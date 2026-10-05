@@ -155,6 +155,7 @@ impl LlmProvider for ClaudeProvider {
             text,
             tool_calls,
             usage,
+            truncated: resp.get("stop_reason").and_then(|v| v.as_str()) == Some("max_tokens"),
         })
     }
 }

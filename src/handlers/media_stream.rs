@@ -911,6 +911,19 @@ async fn classify_and_record_bot_call(
     }
 }
 
+/// The text up to and including its first sentence-ending punctuation mark.
+fn first_sentence(text: &str) -> &str {
+    let text = text.trim();
+    let mut chars = text.char_indices().peekable();
+    while let Some((i, c)) = chars.next() {
+        let ends_here = chars.peek().is_none_or(|(_, next)| next.is_whitespace());
+        if matches!(c, '.' | '!' | '?') && ends_here {
+            return &text[..i + c.len_utf8()];
+        }
+    }
+    text
+}
+
 /// Strip markdown formatting that would be spoken literally by TTS.
 /// Handles: **bold**, *italic*, _underscore_, `code`, # headings, - / * bullet lines.
 fn strip_markdown(input: &str) -> String {
@@ -980,7 +993,7 @@ async fn run_tool_loop(
     for round in 0..MAX_ROUNDS {
         let conv_snapshot = conversation.lock().await.clone();
 
-        let completion = assistant::respond_with_tools(
+        let mut completion = assistant::respond_with_tools(
             state.llm.as_ref(),
             system_prompt,
             &conv_snapshot,
@@ -991,6 +1004,34 @@ async fn run_tool_loop(
         if let Some(u) = completion.usage {
             input_tokens += u.input_tokens;
             output_tokens += u.output_tokens;
+        }
+
+        // A reply that runs into max_tokens without a tool call is the model
+        // thinking out loud (it never got as far as the call), not something
+        // to read to the caller. Ask once more for just the call or a short
+        // answer; if that runs away too, speak only its opening sentence.
+        if completion.truncated && completion.tool_calls.is_empty() {
+            tracing::warn!(
+                "LLM reply for {call_sid} hit max_tokens with no tool call, retrying: {}",
+                completion.text
+            );
+            let retry_prompt = format!("{system_prompt}{}", assistant::NO_NARRATION_RETRY);
+            completion = assistant::respond_with_tools(
+                state.llm.as_ref(),
+                &retry_prompt,
+                &conv_snapshot,
+                &state.agent_profile,
+                tools,
+            )
+            .await?;
+            if let Some(u) = completion.usage {
+                input_tokens += u.input_tokens;
+                output_tokens += u.output_tokens;
+            }
+            if completion.truncated && completion.tool_calls.is_empty() {
+                tracing::warn!("Retry for {call_sid} was cut off too, speaking its first sentence");
+                completion.text = first_sentence(&completion.text).to_string();
+            }
         }
 
         if completion.tool_calls.is_empty() {
@@ -1038,4 +1079,23 @@ async fn run_tool_loop(
     }
 
     Err("Exceeded maximum tool-use rounds".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn first_sentence_stops_at_the_first_full_stop() {
+        assert_eq!(
+            first_sentence("I'll check if 2:00 PM on Friday is free. Let me verify. Today is"),
+            "I'll check if 2:00 PM on Friday is free."
+        );
+        assert_eq!(first_sentence("  Sure! What time?  "), "Sure!");
+        assert_eq!(
+            first_sentence("It costs 3.50 dollars"),
+            "It costs 3.50 dollars"
+        );
+        assert_eq!(first_sentence(""), "");
+    }
 }
