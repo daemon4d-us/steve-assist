@@ -113,7 +113,7 @@ fn build_tool_definitions() -> Vec<crate::services::llm::Tool> {
                     },
                     "attendee_email": {
                         "type": "string",
-                        "description": "Optional caller email address to invite"
+                        "description": "Optional: the caller's email address, only if they volunteered one. Never ask for an email and never wait for one; the meeting is booked without it"
                     }
                 },
                 "required": ["title", "start", "end", "start_weekday"]
@@ -587,7 +587,10 @@ pub fn build_calendar_context(profile: &AgentProfile, tools_available: bool) -> 
            and title with the caller. Repeat the details back and wait for their yes. \
            book_meeting enforces this: its first call for a slot only returns the details \
            to confirm, and it books on a second call with caller_confirmed true.\n\
-         - If the caller gives an email, pass it as attendee_email so they get an invite.\n\
+         - An email address is optional. If the caller volunteers one, pass it as \
+           attendee_email so they get an invite; otherwise book without it. Never ask for \
+           an email or make the booking wait for one. The owner is always on their own \
+           calendar and needs no invite.\n\
          - Only book on the personal calendar.\n\
          - Your responses are spoken aloud by a voice model. Respond in plain \
            conversational text ONLY. Never use markdown: no asterisks, no bullet \

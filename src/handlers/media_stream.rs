@@ -962,6 +962,11 @@ fn strip_markdown(input: &str) -> String {
             trimmed = rest;
         } else if let Some(rest) = trimmed.strip_prefix("+ ") {
             trimmed = rest;
+        } else if let Some(rest) = trimmed
+            .strip_prefix("• ")
+            .or_else(|| trimmed.strip_prefix("· "))
+        {
+            trimmed = rest;
         } else {
             trimmed = strip_list_number(trimmed);
         }
@@ -1201,7 +1206,7 @@ mod tests {
     fn strip_markdown_turns_a_slot_list_into_spoken_ranges() {
         let reply = "Here are some slots **this Friday**:\n\
                      - 9:30 AM - 10:00 AM\n\
-                     - 11:45 AM – 12:15 PM\n\
+                     • 11:45 AM – 12:15 PM\n\
                      1. 12:45 PM - 1:15 PM\n\
                      2) 9–10\n\n\
                      Which works?";

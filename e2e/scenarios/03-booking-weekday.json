@@ -7,6 +7,7 @@
     { "say": "I need a thirty minute meeting with Jeremy this coming Friday at any free time between nine and six.", "reply_contains": "Friday" },
     { "say": "The first one works and please call it Steve test meeting." },
     { "say": "Yes that's right, go ahead and book it.", "reply_contains": "Friday" },
+    { "say": "Yes, that is correct." },
     { "say": "Perfect, thank you, goodbye." }
   ],
   "assertions": {
