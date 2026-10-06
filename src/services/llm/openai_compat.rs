@@ -134,10 +134,18 @@ fn tools_to_wire(tools: &[Tool]) -> Vec<Value> {
 }
 
 /// Nemotron and other reasoning models may inline their chain of thought as
-/// `<think>...</think>`. That must never reach TTS, so strip it.
+/// `<think>...</think>`. That must never reach TTS, so strip it. With thinking
+/// disabled, Nemotron 3 still sometimes opens the reply with its plan and only
+/// a closing `</think>` (the opening tag is part of the chat template), so a
+/// stray `</think>` ends the thought as well: everything before it goes.
 fn strip_thinking(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
+    if let Some(end) = rest.find("</think>")
+        && !rest[..end].contains("<think>")
+    {
+        rest = &rest[end + "</think>".len()..];
+    }
     while let Some(start) = rest.find("<think>") {
         out.push_str(&rest[..start]);
         match rest[start..].find("</think>") {
@@ -254,6 +262,11 @@ mod tests {
         );
         assert_eq!(strip_thinking("plain"), "plain");
         assert_eq!(strip_thinking("<think>unterminated"), "");
+        // Opening tag swallowed by the chat template: only the closing one arrives.
+        assert_eq!(
+            strip_thinking("Let's suggest 9 AM and confirm.\n</think>\nHow about 9 AM Friday?"),
+            "How about 9 AM Friday?"
+        );
     }
 
     #[test]

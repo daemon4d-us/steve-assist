@@ -1,0 +1,17 @@
+{
+  "name": "booking-on-a-named-weekday",
+  "caller_phone": "+15551230002",
+  "reset_caller": true,
+  "turns": [
+    { "say": "Hi, this is Alex Turner." },
+    { "say": "I need a thirty minute meeting with Jeremy this coming Friday at any free time between nine and six.", "reply_contains": "Friday" },
+    { "say": "The first one works and please call it Steve test meeting." },
+    { "say": "Yes that's right, go ahead and book it.", "reply_contains": "Friday" },
+    { "say": "Perfect, thank you, goodbye." }
+  ],
+  "assertions": {
+    "caller_created": true,
+    "summary_present": true,
+    "min_bookings": 1
+  }
+}

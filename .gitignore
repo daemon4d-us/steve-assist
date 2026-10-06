@@ -28,3 +28,6 @@ terraform/terraform.tfvars
 frontend/node_modules/
 frontend/dist/
 frontend/.env
+
+# steve-e2e output
+e2e-report/

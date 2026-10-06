@@ -31,7 +31,13 @@ keep each run's `report.md`; the provider is labeled in every row.
 ## Scenario format
 
 One JSON file per scenario (see `scenarios/`). `reset_caller` wipes the number's
-caller profile and memories first, for deterministic new-caller runs.
+caller profile and memories first, for deterministic new-caller runs. A turn's
+`reply_contains` asserts on Steve's reply to that turn.
+
+`03-booking-weekday` asks for "this coming Friday" and expects Steve to confirm
+a Friday and record a booking, which guards the weekday check in
+`calendar_tools::check_weekday`. It books a real event titled "E2E test meeting"
+on the profile's calendar, so delete it afterwards.
 
 ## PSTN transport (second Twilio number)
 
