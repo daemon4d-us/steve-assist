@@ -85,6 +85,9 @@ All audio is **μ-law (PCMU), 8000 Hz, mono**, transported as base64-encoded chu
 - End-of-call processing spawns background tasks for summary generation and memory extraction
 - Caller phone passed from `/incoming-call` to `/media-stream` via TwiML `<Parameter>` (stateless, no shared HashMap needed)
 - Model per agent profile (`agent_profiles.{id}.model`, currently `claude-sonnet-4-6`) with max_tokens=300 for concise spoken responses
+- The agent profile is re-read from Firestore at the start of every call (`load_call_profile` in `media_stream.rs`), so dashboard edits to prompts, model, name or voice apply to the next call without a restart; `AppState.agent_profile` is only the startup fallback
+- `agent_profiles.{id}.agent_name` is the name the agent introduces itself with. Every prompt field may use `{agent_name}`; if the base prompt doesn't, the server prepends an identity line. It is also passed to caller-name extraction so "Hi Susan" is never filed as the caller's name
+- `agent_profiles.{id}.voice_id` picks the ElevenLabs voice per profile; `ELEVENLABS_VOICE_ID` is only the fallback. The dashboard's voice picker is fed by `GET /api/voices`, which proxies the ElevenLabs voice list
 
 ## LLM Provider Layer (`src/services/llm/`)
 

@@ -71,6 +71,7 @@ async fn main() {
             post(handlers::api::calendar_reauth_url),
         )
         .route("/api/bot-groups", get(handlers::api::list_bot_groups))
+        .route("/api/voices", get(handlers::api::list_voices))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             handlers::auth::require_auth,

@@ -595,7 +595,10 @@ pub fn build_calendar_context(profile: &AgentProfile, tools_available: bool) -> 
            them naturally like \"nine to ten, ten to eleven, or eleven to noon\".\n"
             .to_string()
     } else {
-        format!("\n{}\n", profile.calendar_prompt)
+        format!(
+            "\n{}\n",
+            crate::services::assistant::with_agent_name(profile, &profile.calendar_prompt)
+        )
     };
 
     format!(

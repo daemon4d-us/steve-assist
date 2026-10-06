@@ -146,7 +146,9 @@ export function AssignmentEditor({ token, assignmentId, profiles, onBack }: Prop
               className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
             >
               {profiles.map((p) => (
-                <option key={p.id} value={p.id}>{p.id} ({p.model})</option>
+                <option key={p.id} value={p.id}>
+                  {p.agent_name ? `${p.agent_name} (${p.id})` : `${p.id} (${p.model})`}
+                </option>
               ))}
             </select>
           </div>

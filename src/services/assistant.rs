@@ -50,6 +50,34 @@ fn current_time_line(profile: &AgentProfile, now: DateTime<Utc>) -> String {
     )
 }
 
+/// Placeholder for the agent's own name in every profile prompt field.
+pub const AGENT_NAME_PLACEHOLDER: &str = "{agent_name}";
+
+/// The shared opening of both system prompts: the base prompt with the agent
+/// name filled in, then the clock and the spoken-reply rules. When the profile
+/// has a name but the base prompt never mentions the placeholder, an identity
+/// line is prepended so the setting still takes effect.
+fn prompt_preamble(profile: &AgentProfile) -> String {
+    let mut prompt = String::new();
+    if !profile.agent_name.is_empty() && !profile.base_prompt.contains(AGENT_NAME_PLACEHOLDER) {
+        prompt.push_str(&format!(
+            "Your name is {}. Introduce yourself by that name.\n\n",
+            profile.agent_name
+        ));
+    }
+    prompt.push_str(&with_agent_name(profile, &profile.base_prompt));
+    prompt.push_str(&current_time_line(profile, Utc::now()));
+    prompt.push_str(END_CALL_PROMPT);
+    prompt.push_str(SPOKEN_ONLY_PROMPT);
+    prompt.push('\n');
+    prompt
+}
+
+/// Fill `{agent_name}` in one prompt field.
+pub fn with_agent_name(profile: &AgentProfile, text: &str) -> String {
+    text.replace(AGENT_NAME_PLACEHOLDER, &profile.agent_name)
+}
+
 /// Build a dynamic system prompt based on caller identity and memories.
 pub fn build_system_prompt(
     profile: &AgentProfile,
@@ -57,17 +85,12 @@ pub fn build_system_prompt(
     caller_name: Option<&str>,
     memories: &[db::Memory],
 ) -> String {
-    let mut prompt = profile.base_prompt.clone();
-    prompt.push_str(&current_time_line(profile, Utc::now()));
-    prompt.push_str(END_CALL_PROMPT);
-    prompt.push_str(SPOKEN_ONLY_PROMPT);
-    prompt.push('\n');
+    let mut prompt = prompt_preamble(profile);
 
     match caller_name {
         Some(name) => {
             prompt.push_str(
-                &profile
-                    .returning_caller_prompt
+                &with_agent_name(profile, &profile.returning_caller_prompt)
                     .replace("{phone}", caller_phone)
                     .replace("{name}", name),
             );
@@ -79,15 +102,17 @@ pub fn build_system_prompt(
                     .collect::<Vec<_>>()
                     .join("\n");
                 prompt.push_str(
-                    &profile
-                        .memory_prompt
+                    &with_agent_name(profile, &profile.memory_prompt)
                         .replace("{name}", name)
                         .replace("{memories}", &memory_list),
                 );
             }
         }
         None => {
-            prompt.push_str(&profile.new_caller_prompt.replace("{phone}", caller_phone));
+            prompt.push_str(
+                &with_agent_name(profile, &profile.new_caller_prompt)
+                    .replace("{phone}", caller_phone),
+            );
         }
     }
 
@@ -95,23 +120,19 @@ pub fn build_system_prompt(
 }
 
 /// Build a system prompt for outbound calls with an assignment objective.
-/// Uses the profile's `outbound_prompt` field with placeholders: {name}, {phone}, {objective}.
+/// Uses the profile's `outbound_prompt` field with placeholders: {name}, {phone}, {objective},
+/// {agent_name}.
 pub fn build_outbound_prompt(
     profile: &AgentProfile,
     objective: &str,
     contact_name: Option<&str>,
     contact_phone: &str,
 ) -> String {
-    let mut prompt = profile.base_prompt.clone();
-    prompt.push_str(&current_time_line(profile, Utc::now()));
-    prompt.push_str(END_CALL_PROMPT);
-    prompt.push_str(SPOKEN_ONLY_PROMPT);
-    prompt.push('\n');
+    let mut prompt = prompt_preamble(profile);
     let name_str = contact_name.unwrap_or("the person");
 
     prompt.push_str(
-        &profile
-            .outbound_prompt
+        &with_agent_name(profile, &profile.outbound_prompt)
             .replace("{name}", name_str)
             .replace("{phone}", contact_phone)
             .replace("{objective}", objective),
@@ -171,16 +192,17 @@ async fn utility(
     Ok(completion.text)
 }
 
-/// Extract the caller's name from a transcript snippet.
+/// Extract the caller's name from a transcript snippet. `agent_name` is the
+/// assistant's own name, so a caller opening with "Hi Susan" is not filed as
+/// Susan.
 pub async fn extract_name(
     llm: &dyn LlmProvider,
     transcript: &str,
+    agent_name: &str,
 ) -> Result<Option<String>, LlmError> {
-    let system = "Extract the person's name from the following transcript. \
-        Return ONLY the name (first name, or first and last name if given). \
-        If no name is mentioned, return exactly the word UNKNOWN.";
+    let system = extract_name_prompt(agent_name);
 
-    let name = utility(llm, system, transcript.to_string(), 50).await?;
+    let name = utility(llm, &system, transcript.to_string(), 50).await?;
     let name = name.trim().to_string();
 
     if name == "UNKNOWN" || name.is_empty() {
@@ -188,6 +210,20 @@ pub async fn extract_name(
     } else {
         Ok(Some(name))
     }
+}
+
+fn extract_name_prompt(agent_name: &str) -> String {
+    let mut system = "Extract the caller's name from the following transcript. \
+        Return ONLY the name (first name, or first and last name if given). \
+        If no name is mentioned, return exactly the word UNKNOWN."
+        .to_string();
+    if !agent_name.is_empty() {
+        system.push_str(&format!(
+            " The caller is speaking to an assistant named {agent_name}; that is not the \
+             caller's name, so never return it."
+        ));
+    }
+    system
 }
 
 /// Generate a summary of a completed call.
@@ -366,5 +402,84 @@ mod tests {
         assert!(inbound.ends_with(" New caller +15551234567."));
         assert!(inbound.contains(SPOKEN_ONLY_PROMPT));
         assert!(outbound.contains(SPOKEN_ONLY_PROMPT));
+    }
+
+    fn named_profile(agent_name: &str, base_prompt: &str) -> AgentProfile {
+        let mut p = profile("UTC");
+        p.agent_name = agent_name.to_string();
+        p.base_prompt = base_prompt.to_string();
+        p.new_caller_prompt = " Say {agent_name} is speaking to {phone}.".to_string();
+        p.returning_caller_prompt = " {agent_name} greets {name}.".to_string();
+        p.memory_prompt = " {agent_name} recalls: {memories}".to_string();
+        p.outbound_prompt = " {agent_name} calls {name} about {objective}.".to_string();
+        p
+    }
+
+    #[test]
+    fn agent_name_fills_the_placeholder_in_every_prompt_field() {
+        let p = named_profile("Susan", "You are {agent_name}, an assistant.");
+        let memories = vec![db::Memory {
+            caller_phone: "+1".into(),
+            call_sid: "CA1".into(),
+            content: "likes tea".into(),
+            created_at: Utc::now(),
+            active: true,
+        }];
+
+        let new_caller = build_system_prompt(&p, "+15551234567", None, &[]);
+        assert!(
+            new_caller.starts_with("You are Susan, an assistant.\n\n"),
+            "{new_caller}"
+        );
+        assert!(new_caller.ends_with(" Say Susan is speaking to +15551234567."));
+        assert!(!new_caller.contains("Your name is"), "{new_caller}");
+
+        let returning = build_system_prompt(&p, "+15551234567", Some("Ann"), &memories);
+        assert!(
+            returning.ends_with(" Susan greets Ann. Susan recalls: - likes tea"),
+            "{returning}"
+        );
+
+        let outbound = build_outbound_prompt(&p, "the invoice", Some("Ann"), "+15551234567");
+        assert!(
+            outbound.starts_with("You are Susan, an assistant.\n\n"),
+            "{outbound}"
+        );
+        assert!(
+            outbound.ends_with(" Susan calls Ann about the invoice."),
+            "{outbound}"
+        );
+        assert!(!new_caller.contains("{agent_name}") && !outbound.contains("{agent_name}"));
+    }
+
+    #[test]
+    fn a_base_prompt_without_the_placeholder_gets_an_identity_line() {
+        let p = named_profile("Susan", "You are a helpful assistant.");
+        let inbound = build_system_prompt(&p, "+15551234567", None, &[]);
+        let outbound = build_outbound_prompt(&p, "say hi", None, "+15551234567");
+        let expected = "Your name is Susan. Introduce yourself by that name.\n\nYou are a helpful assistant.\n\n";
+        assert!(inbound.starts_with(expected), "{inbound}");
+        assert!(outbound.starts_with(expected), "{outbound}");
+    }
+
+    #[test]
+    fn an_empty_agent_name_changes_nothing() {
+        let p = named_profile("", "You are Steve.");
+        let inbound = build_system_prompt(&p, "+15551234567", None, &[]);
+        assert!(inbound.starts_with("You are Steve.\n\n"), "{inbound}");
+        assert!(!inbound.contains("Your name is"), "{inbound}");
+        // The placeholder simply renders empty when no name is set.
+        assert!(
+            inbound.ends_with(" Say  is speaking to +15551234567."),
+            "{inbound}"
+        );
+    }
+
+    #[test]
+    fn name_extraction_prompt_rules_out_the_agent_name() {
+        assert!(!extract_name_prompt("").contains("assistant named"));
+        let with_name = extract_name_prompt("Susan");
+        assert!(with_name.contains("assistant named Susan"), "{with_name}");
+        assert!(with_name.contains("never return it"), "{with_name}");
     }
 }

@@ -10,11 +10,14 @@ export interface SessionSummary {
 
 export interface ProfileListItem {
   id: string;
+  agent_name: string;
   model: string;
   max_tokens: number;
+  voice_id: string | null;
 }
 
 export interface AgentProfile {
+  agent_name: string;
   base_prompt: string;
   new_caller_prompt: string;
   returning_caller_prompt: string;
@@ -28,6 +31,15 @@ export interface AgentProfile {
   working_days: number[];
   calendar_prompt: string;
   voice_id: string | null;
+}
+
+/** An ElevenLabs voice as served by GET /api/voices. */
+export interface Voice {
+  voice_id: string;
+  name: string;
+  category: string;
+  labels: Record<string, string>;
+  preview_url: string | null;
 }
 
 export interface AssignmentContact {

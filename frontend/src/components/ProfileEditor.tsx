@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
 import type { AgentProfile } from "../types";
 import { useProfile } from "../hooks/useProfiles";
+import { VoicePicker } from "./VoicePicker";
 
 interface Props {
   token: string;
@@ -70,11 +71,35 @@ export function ProfileEditor({ token, profileId, onBack }: Props) {
           &larr; Back to profiles
         </button>
         <h2 className="text-lg font-semibold text-gray-800">
-          Profile: {profileId}
+          {form.agent_name ? (
+            <>
+              {form.agent_name}{" "}
+              <span className="text-sm font-normal text-gray-400">({profileId})</span>
+            </>
+          ) : (
+            <>Profile: {profileId}</>
+          )}
         </h2>
       </div>
 
       <div className="rounded-lg bg-white p-6 shadow space-y-5">
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-1">
+            Agent Name
+            <span className="ml-2 text-xs text-gray-400">
+              How the agent introduces itself. Use {"{agent_name}"} in any prompt;
+              if the base prompt doesn't, the server prepends an identity line.
+            </span>
+          </label>
+          <input
+            type="text"
+            value={form.agent_name}
+            onChange={(e) => updateField("agent_name", e.target.value)}
+            placeholder="e.g. Susan"
+            className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
+          />
+        </div>
+
         <div className="grid grid-cols-2 gap-4">
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">
@@ -100,21 +125,11 @@ export function ProfileEditor({ token, profileId, onBack }: Props) {
           </div>
         </div>
 
-        <div>
-          <label className="block text-sm font-medium text-gray-700 mb-1">
-            ElevenLabs Voice ID
-            <span className="ml-2 text-xs text-gray-400">
-              Leave empty to use the server default (ELEVENLABS_VOICE_ID)
-            </span>
-          </label>
-          <input
-            type="text"
-            value={form.voice_id ?? ""}
-            onChange={(e) => updateField("voice_id", e.target.value || null)}
-            placeholder="e.g. 21m00Tcm4TlvDq8ikWAM"
-            className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm font-mono"
-          />
-        </div>
+        <VoicePicker
+          token={token}
+          value={form.voice_id}
+          onChange={(v) => updateField("voice_id", v)}
+        />
 
         <div>
           <label className="block text-sm font-medium text-gray-700 mb-1">

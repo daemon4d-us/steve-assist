@@ -6,6 +6,7 @@ use axum::response::IntoResponse;
 use futures_util::{SinkExt, StreamExt};
 use tokio::sync::Mutex;
 
+use crate::services::db::AgentProfile;
 use crate::services::{assistant, calendar_tools, call_control, db, elevenlabs, llm, speech};
 use crate::state::AppState;
 use crate::twilio::{audio, dtmf, messages as twilio_msg};
@@ -32,7 +33,12 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
     // True while a caller-name extraction is running, so unknown-caller turns
     // don't launch overlapping extractions.
     let name_lookup_inflight: Arc<Mutex<bool>> = Arc::new(Mutex::new(false));
-    let voice_id: Arc<Mutex<String>> = Arc::new(Mutex::new(state.elevenlabs_voice_id.clone()));
+    // The agent profile this call runs with. Starts as the startup snapshot and
+    // is replaced by the latest Firestore copy on the `start` event, so
+    // dashboard edits (name, prompts, model, voice) apply to the next call
+    // without a restart.
+    let call_profile: Arc<Mutex<Arc<AgentProfile>>> =
+        Arc::new(Mutex::new(Arc::new(state.agent_profile.clone())));
     let is_outbound_call: Arc<Mutex<bool>> = Arc::new(Mutex::new(false));
 
     // Create audio channel upfront
@@ -56,7 +62,7 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
         let system_prompt = system_prompt.clone();
         let conversation = conversation.clone();
         let twilio_sink = twilio_sink.clone();
-        let voice_id = voice_id.clone();
+        let call_profile = call_profile.clone();
         let is_outbound_call = is_outbound_call.clone();
         let state = state.clone();
         async move {
@@ -108,7 +114,7 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
                                 .custom_parameters
                                 .get("profileId")
                                 .cloned()
-                                .unwrap_or_else(|| "default".to_string());
+                                .unwrap_or_else(|| state.agent_profile_id.clone());
                             let assignment_id = start
                                 .custom_parameters
                                 .get("assignmentId")
@@ -130,15 +136,8 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
                             }
 
                             // Load the assignment's agent profile
-                            let profile = db::get_agent_profile(&state.firestore_db, &profile_id)
-                                .await
-                                .ok()
-                                .flatten()
-                                .unwrap_or_else(|| state.agent_profile.clone());
-
-                            if let Some(v) = profile.voice_id.as_deref().filter(|s| !s.is_empty()) {
-                                *voice_id.lock().await = v.to_string();
-                            }
+                            let profile = load_call_profile(&state, &profile_id).await;
+                            *call_profile.lock().await = profile.clone();
 
                             let cn = if contact_name_val.is_empty() {
                                 None
@@ -201,7 +200,8 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
                                         .await
                                         .push(llm::Message::assistant_text(greeting.clone()));
 
-                                    let active_voice = voice_id.lock().await.clone();
+                                    let active_voice =
+                                        active_voice(&profile, &state.elevenlabs_voice_id);
                                     match elevenlabs::text_to_speech(
                                         &state.elevenlabs_api_key,
                                         &active_voice,
@@ -261,32 +261,24 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
                             tracing::info!("Caller phone: {phone}");
                             *caller_phone.lock().await = Some(phone.clone());
 
-                            // Refresh voice_id from the latest agent profile in Firestore
-                            // (lets the dashboard change the voice without a backend restart)
-                            if let Ok(Some(latest_profile)) =
-                                db::get_agent_profile(&state.firestore_db, &state.agent_profile_id)
-                                    .await
-                            {
-                                if let Some(v) =
-                                    latest_profile.voice_id.as_deref().filter(|s| !s.is_empty())
-                                {
-                                    *voice_id.lock().await = v.to_string();
-                                }
-                            }
+                            // Take the latest agent profile from Firestore so dashboard
+                            // edits apply to this call without a backend restart.
+                            let profile = load_call_profile(&state, &state.agent_profile_id).await;
+                            *call_profile.lock().await = profile.clone();
 
                             // Check if calendar tools are available (OAuth configured + tokens stored)
                             let calendar_tools_available =
                                 !calendar_tools::available_tools(&state).await.is_empty();
                             let calendar_ctx = calendar_tools::build_calendar_context(
-                                &state.agent_profile,
+                                &profile,
                                 calendar_tools_available,
                             );
 
                             // Look up caller in Firestore
                             match db::get_caller(&state.firestore_db, &phone).await {
-                                Ok(Some(profile)) => {
-                                    tracing::info!("Returning caller: {}", profile.name);
-                                    *caller_name.lock().await = Some(profile.name.clone());
+                                Ok(Some(caller)) => {
+                                    tracing::info!("Returning caller: {}", caller.name);
+                                    *caller_name.lock().await = Some(caller.name.clone());
 
                                     // Load memories
                                     let memories = db::get_memories(
@@ -298,9 +290,9 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
                                     .unwrap_or_default();
 
                                     let mut prompt = assistant::build_system_prompt(
-                                        &state.agent_profile,
+                                        &profile,
                                         &phone,
-                                        Some(&profile.name),
+                                        Some(&caller.name),
                                         &memories,
                                     );
                                     prompt.push_str(&calendar_ctx);
@@ -308,23 +300,15 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
                                 }
                                 Ok(None) => {
                                     tracing::info!("New caller from {phone}");
-                                    let mut prompt = assistant::build_system_prompt(
-                                        &state.agent_profile,
-                                        &phone,
-                                        None,
-                                        &[],
-                                    );
+                                    let mut prompt =
+                                        assistant::build_system_prompt(&profile, &phone, None, &[]);
                                     prompt.push_str(&calendar_ctx);
                                     *system_prompt.lock().await = prompt;
                                 }
                                 Err(e) => {
                                     tracing::error!("Firestore caller lookup failed: {e}");
-                                    let mut prompt = assistant::build_system_prompt(
-                                        &state.agent_profile,
-                                        &phone,
-                                        None,
-                                        &[],
-                                    );
+                                    let mut prompt =
+                                        assistant::build_system_prompt(&profile, &phone, None, &[]);
                                     prompt.push_str(&calendar_ctx);
                                     *system_prompt.lock().await = prompt;
                                 }
@@ -351,7 +335,7 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
                                 state.llm.as_ref(),
                                 &greeting_prompt,
                                 &greeting_messages,
-                                &state.agent_profile,
+                                &profile,
                             )
                             .await
                             {
@@ -383,7 +367,8 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
                                     }
 
                                     // Convert to speech and send
-                                    let active_voice = voice_id.lock().await.clone();
+                                    let active_voice =
+                                        active_voice(&profile, &state.elevenlabs_voice_id);
                                     match elevenlabs::text_to_speech(
                                         &state.elevenlabs_api_key,
                                         &active_voice,
@@ -455,7 +440,7 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
         let system_prompt = system_prompt.clone();
         let conversation = conversation.clone();
         let name_lookup_inflight = name_lookup_inflight.clone();
-        let voice_id = voice_id.clone();
+        let call_profile = call_profile.clone();
         let state = state.clone();
         async move {
             let mut turn_index: u32 = 0;
@@ -465,6 +450,7 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
                 turn_index += 1;
                 let current_prompt = system_prompt.lock().await.clone();
                 let csid = call_sid.lock().await.clone().unwrap_or_default();
+                let profile = call_profile.lock().await.clone();
 
                 // Add user message to conversation
                 {
@@ -500,10 +486,12 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
                         let sp = system_prompt.clone();
                         let db = state.firestore_db.clone();
                         let md = state.memory_depth;
-                        let profile = state.agent_profile.clone();
+                        let profile = profile.clone();
                         let inflight_flag = name_lookup_inflight.clone();
                         tokio::spawn(async move {
-                            match assistant::extract_name(llm.as_ref(), &t).await {
+                            match assistant::extract_name(llm.as_ref(), &t, &profile.agent_name)
+                                .await
+                            {
                                 Ok(Some(name)) => {
                                     tracing::info!("Extracted caller name: {name}");
                                     *cn.lock().await = Some(name.clone());
@@ -544,6 +532,7 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
 
                 let turn = match run_tool_loop(
                     &state,
+                    &profile,
                     &current_prompt,
                     &conversation,
                     &tools,
@@ -632,7 +621,7 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
                 let mut send_ms: u128 = 0;
                 let mut audio_bytes: usize = 0;
                 if !spoken_text.is_empty() {
-                    let active_voice = voice_id.lock().await.clone();
+                    let active_voice = active_voice(&profile, &state.elevenlabs_voice_id);
                     let tts_started = std::time::Instant::now();
                     match elevenlabs::text_to_speech(
                         &state.elevenlabs_api_key,
@@ -924,6 +913,36 @@ fn first_sentence(text: &str) -> &str {
     text
 }
 
+/// The latest copy of an agent profile for a call, falling back to the startup
+/// snapshot when Firestore has no such document or cannot be reached.
+async fn load_call_profile(state: &AppState, profile_id: &str) -> Arc<AgentProfile> {
+    match db::get_agent_profile(&state.firestore_db, profile_id).await {
+        Ok(Some(profile)) => Arc::new(profile),
+        Ok(None) => {
+            tracing::warn!("Agent profile {profile_id} not found; using the startup profile");
+            Arc::new(state.agent_profile.clone())
+        }
+        Err(e) => {
+            tracing::error!(
+                "Failed to load agent profile {profile_id}: {e}; using the startup profile"
+            );
+            Arc::new(state.agent_profile.clone())
+        }
+    }
+}
+
+/// The ElevenLabs voice for a call: the profile's, or the server default
+/// (`ELEVENLABS_VOICE_ID`) when the profile leaves it empty.
+fn active_voice(profile: &AgentProfile, default_voice: &str) -> String {
+    profile
+        .voice_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .unwrap_or(default_voice)
+        .to_string()
+}
+
 /// Strip markdown formatting that would be spoken literally by TTS.
 /// Handles: **bold**, *italic*, _underscore_, `code`, # headings, - / * / +
 /// and `1.` / `1)` list lines, and the dash in a time or number range
@@ -1036,6 +1055,7 @@ struct TurnOutput {
 /// text to the shared conversation and returns it. Handles up to 4 tool-execution rounds.
 async fn run_tool_loop(
     state: &Arc<AppState>,
+    profile: &AgentProfile,
     system_prompt: &str,
     conversation: &Arc<Mutex<Vec<llm::Message>>>,
     tools: &[llm::Tool],
@@ -1051,7 +1071,7 @@ async fn run_tool_loop(
         let conv_snapshot = conversation.lock().await.clone();
         let ctx = calendar_tools::ToolContext {
             state,
-            profile: &state.agent_profile,
+            profile,
             call_sid,
             caller_phone,
             history: &conv_snapshot,
@@ -1061,7 +1081,7 @@ async fn run_tool_loop(
             state.llm.as_ref(),
             system_prompt,
             &conv_snapshot,
-            &state.agent_profile,
+            profile,
             tools,
         )
         .await?;
@@ -1084,7 +1104,7 @@ async fn run_tool_loop(
                 state.llm.as_ref(),
                 &retry_prompt,
                 &conv_snapshot,
-                &state.agent_profile,
+                profile,
                 tools,
             )
             .await?;
@@ -1161,6 +1181,20 @@ mod tests {
             "It costs 3.50 dollars"
         );
         assert_eq!(first_sentence(""), "");
+    }
+
+    #[test]
+    fn active_voice_prefers_the_profile_and_falls_back_to_the_server_default() {
+        let mut profile: AgentProfile = serde_json::from_value(serde_json::json!({
+            "base_prompt": "x", "new_caller_prompt": "x", "returning_caller_prompt": "x",
+            "memory_prompt": "x", "model": "m", "max_tokens": 10
+        }))
+        .unwrap();
+        assert_eq!(active_voice(&profile, "env-voice"), "env-voice");
+        profile.voice_id = Some("  ".into());
+        assert_eq!(active_voice(&profile, "env-voice"), "env-voice");
+        profile.voice_id = Some(" profile-voice ".into());
+        assert_eq!(active_voice(&profile, "env-voice"), "profile-voice");
     }
 
     #[test]

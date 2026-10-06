@@ -1,13 +1,21 @@
-import type { ProfileListItem } from "../types";
+import type { ProfileListItem, Voice } from "../types";
 
 interface Props {
   profiles: ProfileListItem[];
   loading: boolean;
   error: string | null;
+  /** ElevenLabs voices, to show a voice's name instead of its id. */
+  voices?: Voice[];
   onSelect: (id: string) => void;
 }
 
-export function ProfilesList({ profiles, loading, error, onSelect }: Props) {
+export function ProfilesList({ profiles, loading, error, voices = [], onSelect }: Props) {
+  function voiceName(voiceId: string | null) {
+    if (!voiceId) return <span className="text-gray-400">server default</span>;
+    const v = voices.find((x) => x.voice_id === voiceId);
+    return v ? v.name : <span className="font-mono text-xs">{voiceId}</span>;
+  }
+
   if (error) {
     return (
       <div className="rounded-md bg-red-50 p-4 text-red-700">
@@ -25,10 +33,16 @@ export function ProfilesList({ profiles, loading, error, onSelect }: Props) {
               Profile ID
             </th>
             <th className="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-500">
+              Name
+            </th>
+            <th className="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-500">
               Model
             </th>
             <th className="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-500">
               Max Tokens
+            </th>
+            <th className="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-500">
+              Voice
             </th>
             <th className="px-6 py-3" />
           </tr>
@@ -36,13 +50,13 @@ export function ProfilesList({ profiles, loading, error, onSelect }: Props) {
         <tbody className="divide-y divide-gray-200">
           {loading ? (
             <tr>
-              <td colSpan={4} className="px-6 py-8 text-center text-gray-400">
+              <td colSpan={6} className="px-6 py-8 text-center text-gray-400">
                 Loading...
               </td>
             </tr>
           ) : profiles.length === 0 ? (
             <tr>
-              <td colSpan={4} className="px-6 py-8 text-center text-gray-400">
+              <td colSpan={6} className="px-6 py-8 text-center text-gray-400">
                 No agent profiles found
               </td>
             </tr>
@@ -52,9 +66,15 @@ export function ProfilesList({ profiles, loading, error, onSelect }: Props) {
                 <td className="px-6 py-4 text-sm font-medium text-gray-900">
                   {p.id}
                 </td>
+                <td className="px-6 py-4 text-sm text-gray-600">
+                  {p.agent_name || <span className="text-gray-400">—</span>}
+                </td>
                 <td className="px-6 py-4 text-sm text-gray-600">{p.model}</td>
                 <td className="px-6 py-4 text-sm text-gray-600">
                   {p.max_tokens}
+                </td>
+                <td className="px-6 py-4 text-sm text-gray-600">
+                  {voiceName(p.voice_id)}
                 </td>
                 <td className="px-6 py-4 text-right">
                   <button

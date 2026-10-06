@@ -6,7 +6,7 @@ use axum::http::StatusCode;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::services::{db, google_calendar};
+use crate::services::{db, elevenlabs, google_calendar};
 use crate::state::AppState;
 
 // --- Sessions API ---
@@ -53,8 +53,10 @@ pub async fn list_sessions(
 #[derive(Serialize)]
 pub struct ProfileListItem {
     pub id: String,
+    pub agent_name: String,
     pub model: String,
     pub max_tokens: u32,
+    pub voice_id: Option<String>,
 }
 
 pub async fn list_profiles(
@@ -69,8 +71,10 @@ pub async fn list_profiles(
         .into_iter()
         .map(|(id, p)| ProfileListItem {
             id,
+            agent_name: p.agent_name,
             model: p.model,
             max_tokens: p.max_tokens,
+            voice_id: p.voice_id,
         })
         .collect();
 
@@ -95,8 +99,13 @@ pub async fn get_profile(
 pub async fn update_profile(
     State(state): State<Arc<AppState>>,
     Path(profile_id): Path<String>,
-    Json(profile): Json<db::AgentProfile>,
+    Json(mut profile): Json<db::AgentProfile>,
 ) -> Result<StatusCode, StatusCode> {
+    profile.agent_name = profile.agent_name.trim().to_string();
+    profile.voice_id = profile
+        .voice_id
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty());
     db::update_profile(&state.firestore_db, &profile_id, &profile)
         .await
         .map_err(|e| {
@@ -105,6 +114,21 @@ pub async fn update_profile(
         })?;
 
     Ok(StatusCode::OK)
+}
+
+// --- Voices API ---
+
+/// The ElevenLabs voices the dashboard's voice picker offers.
+pub async fn list_voices(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<elevenlabs::Voice>>, StatusCode> {
+    let voices = elevenlabs::list_voices(&state.elevenlabs_api_key)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to list ElevenLabs voices: {e}");
+            StatusCode::BAD_GATEWAY
+        })?;
+    Ok(Json(voices))
 }
 
 // --- Assignments API ---

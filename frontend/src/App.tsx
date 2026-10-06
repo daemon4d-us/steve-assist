@@ -9,6 +9,7 @@ import { BotGroupsList } from "./components/BotGroupsList";
 import { CalendarStatusBanner } from "./components/CalendarStatusBanner";
 import { useSessions } from "./hooks/useSessions";
 import { useProfiles } from "./hooks/useProfiles";
+import { useVoices } from "./hooks/useVoices";
 import { useAssignments } from "./hooks/useAssignments";
 import { useBotGroups } from "./hooks/useBotGroups";
 import { useCalendarStatus } from "./hooks/useCalendarStatus";
@@ -61,6 +62,7 @@ export default function App() {
 
   const { sessions, loading: sessionsLoading, error: sessionsError } = useSessions(token);
   const { profiles, loading: profilesLoading, error: profilesError } = useProfiles(token);
+  const { voices } = useVoices(token);
   const { assignments, loading: assignmentsLoading, error: assignmentsError } = useAssignments(token);
   const { groups: botGroups, loading: botsLoading, error: botsError } = useBotGroups(token);
   const {
@@ -175,6 +177,7 @@ export default function App() {
             profiles={profiles}
             loading={profilesLoading}
             error={profilesError}
+            voices={voices}
             onSelect={setEditingProfile}
           />
         )}

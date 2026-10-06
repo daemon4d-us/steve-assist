@@ -32,6 +32,11 @@ fn default_working_days() -> Vec<u32> {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentProfile {
+    /// The name the agent introduces itself with. Available to every prompt
+    /// field as `{agent_name}`; empty means the prompts manage the name
+    /// themselves.
+    #[serde(default)]
+    pub agent_name: String,
     pub base_prompt: String,
     pub new_caller_prompt: String,
     pub returning_caller_prompt: String,
