@@ -20,7 +20,11 @@ export function useVoices(token: string | null) {
         const res = await window.fetch(`${API_BASE}/api/voices`, {
           headers: { Authorization: `Bearer ${token}` },
         });
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        if (!res.ok) {
+          // The server sends a plain-text reason for 502s (e.g. a key without voices_read).
+          const reason = res.status === 502 ? (await res.text()).trim() : "";
+          throw new Error(reason || `HTTP ${res.status}`);
+        }
         const data: Voice[] = await res.json();
         if (!cancelled) setVoices(data);
       } catch (e) {

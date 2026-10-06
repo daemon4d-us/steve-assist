@@ -119,14 +119,19 @@ pub async fn update_profile(
 // --- Voices API ---
 
 /// The ElevenLabs voices the dashboard's voice picker offers.
+/// Errors come back as 502 with a plain-text reason the dashboard can show,
+/// e.g. an API key that lacks the `voices_read` permission.
 pub async fn list_voices(
     State(state): State<Arc<AppState>>,
-) -> Result<Json<Vec<elevenlabs::Voice>>, StatusCode> {
+) -> Result<Json<Vec<elevenlabs::Voice>>, (StatusCode, String)> {
     let voices = elevenlabs::list_voices(&state.elevenlabs_api_key)
         .await
         .map_err(|e| {
             tracing::error!("Failed to list ElevenLabs voices: {e}");
-            StatusCode::BAD_GATEWAY
+            (
+                StatusCode::BAD_GATEWAY,
+                elevenlabs::describe_error(e.as_ref()),
+            )
         })?;
     Ok(Json(voices))
 }

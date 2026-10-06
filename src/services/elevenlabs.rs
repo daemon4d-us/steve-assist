@@ -81,9 +81,45 @@ pub async fn list_voices(
     Ok(parsed.voices)
 }
 
+/// A one-line, user-facing reason for a failed ElevenLabs call. The API's
+/// error body is JSON with a `detail.message` (or a plain `detail` string);
+/// anything else is passed through as is.
+pub fn describe_error(err: &(dyn std::error::Error + Send + Sync)) -> String {
+    let text = err.to_string();
+    let Some(json_start) = text.find('{') else {
+        return text;
+    };
+    let message = serde_json::from_str::<serde_json::Value>(&text[json_start..])
+        .ok()
+        .and_then(|v| {
+            let detail = v.get("detail")?;
+            detail
+                .get("message")
+                .and_then(|m| m.as_str())
+                .or_else(|| detail.as_str())
+                .map(str::to_string)
+        });
+    message.unwrap_or(text)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn describe_error_extracts_the_api_message() {
+        let err: Box<dyn std::error::Error + Send + Sync> = format!(
+            "ElevenLabs API error 401 Unauthorized: {}",
+            r#"{"detail":{"type":"authentication_error","code":"unauthorized","message":"The API key you used is missing the permission voices_read to execute this operation.","status":"missing_permissions"}}"#
+        )
+        .into();
+        assert_eq!(
+            describe_error(err.as_ref()),
+            "The API key you used is missing the permission voices_read to execute this operation."
+        );
+        let plain: Box<dyn std::error::Error + Send + Sync> = "connection refused".into();
+        assert_eq!(describe_error(plain.as_ref()), "connection refused");
+    }
 
     #[test]
     fn voice_list_parses_the_fields_the_picker_needs_and_ignores_the_rest() {
