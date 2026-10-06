@@ -261,33 +261,30 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
                             tracing::info!("Caller phone: {phone}");
                             *caller_phone.lock().await = Some(phone.clone());
 
-                            // Take the latest agent profile from Firestore so dashboard
-                            // edits apply to this call without a backend restart.
-                            let profile = load_call_profile(&state, &state.agent_profile_id).await;
+                            // Everything the greeting prompt needs from Firestore, fetched
+                            // at once: these four reads are independent and were the bulk
+                            // of the 2-3 s before the first word. The profile is the latest
+                            // copy so dashboard edits apply without a restart; memories for
+                            // an unknown number simply come back empty.
+                            let setup_started = std::time::Instant::now();
+                            let (profile, calendar_tools, caller_lookup, memories) = tokio::join!(
+                                load_call_profile(&state, &state.agent_profile_id),
+                                calendar_tools::available_tools(&state),
+                                db::get_caller(&state.firestore_db, &phone),
+                                db::get_memories(&state.firestore_db, &phone, state.memory_depth),
+                            );
+                            let setup_ms = setup_started.elapsed().as_millis();
                             *call_profile.lock().await = profile.clone();
-
-                            // Check if calendar tools are available (OAuth configured + tokens stored)
-                            let calendar_tools_available =
-                                !calendar_tools::available_tools(&state).await.is_empty();
                             let calendar_ctx = calendar_tools::build_calendar_context(
                                 &profile,
-                                calendar_tools_available,
+                                !calendar_tools.is_empty(),
                             );
 
-                            // Look up caller in Firestore
-                            match db::get_caller(&state.firestore_db, &phone).await {
+                            match caller_lookup {
                                 Ok(Some(caller)) => {
                                     tracing::info!("Returning caller: {}", caller.name);
                                     *caller_name.lock().await = Some(caller.name.clone());
-
-                                    // Load memories
-                                    let memories = db::get_memories(
-                                        &state.firestore_db,
-                                        &phone,
-                                        state.memory_depth,
-                                    )
-                                    .await
-                                    .unwrap_or_default();
+                                    let memories = memories.unwrap_or_default();
 
                                     let mut prompt = assistant::build_system_prompt(
                                         &profile,
@@ -379,8 +376,9 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
                                         Ok(tts_audio) => {
                                             tracing::info!(
                                                 target: "steve_assist::metrics",
-                                                "greeting call_sid={} llm_ms={} tts_ms={} audio_ms={}",
+                                                "greeting call_sid={} setup_ms={} llm_ms={} tts_ms={} audio_ms={}",
                                                 start.call_sid,
+                                                setup_ms,
                                                 greeting_llm_ms,
                                                 greeting_started.elapsed().as_millis() - greeting_llm_ms,
                                                 tts_audio.len() / 8
