@@ -43,7 +43,7 @@ fn build_tool_definitions() -> Vec<crate::services::llm::Tool> {
                     },
                     "start_weekday": {
                         "type": "string",
-                        "description": "Day of the week the caller asked for, e.g. Friday. The call is rejected if start does not fall on that day"
+                        "description": "Day of the week the caller asked for, e.g. Friday. If start falls on another day the window is moved to that weekday and the result says so"
                     }
                 },
                 "required": ["start", "end"]
@@ -69,6 +69,10 @@ fn build_tool_definitions() -> Vec<crate::services::llm::Tool> {
                     "latest": {
                         "type": "string",
                         "description": "Latest acceptable end as ISO-8601 datetime with offset"
+                    },
+                    "start_weekday": {
+                        "type": "string",
+                        "description": "Day of the week the caller asked for, e.g. Friday. If earliest falls on another day the window is moved to that weekday and the result says so"
                     }
                 },
                 "required": ["duration_minutes", "earliest", "latest"]
@@ -152,10 +156,14 @@ pub async fn dispatch(ctx: &ToolContext<'_>, name: &str, input: &Value) -> Value
 }
 
 async fn check_availability(ctx: &ToolContext<'_>, input: &Value) -> Result<Value, String> {
-    let start = parse_dt(input, "start")?;
-    let end = parse_dt(input, "end")?;
     let tz: Tz = ctx.profile.timezone.parse().unwrap_or(chrono_tz::UTC);
-    check_weekday(input, start, tz, Utc::now())?;
+    let (start, end, date_corrected) = snap_to_weekday(
+        input,
+        parse_dt(input, "start")?,
+        parse_dt(input, "end")?,
+        tz,
+        Utc::now(),
+    );
     let cfg = ctx
         .state
         .google_oauth
@@ -182,11 +190,15 @@ async fn check_availability(ctx: &ToolContext<'_>, input: &Value) -> Result<Valu
         })
         .collect();
 
-    Ok(json!({
+    let mut result = json!({
         "timezone": ctx.profile.timezone,
         "window_start": spoken_dt(start, tz),
         "busy": busy_json,
-    }))
+    });
+    if let Some(note) = date_corrected {
+        result["date_corrected"] = json!(note);
+    }
+    Ok(result)
 }
 
 async fn suggest_slots(ctx: &ToolContext<'_>, input: &Value) -> Result<Value, String> {
@@ -194,8 +206,18 @@ async fn suggest_slots(ctx: &ToolContext<'_>, input: &Value) -> Result<Value, St
         .get("duration_minutes")
         .and_then(|v| v.as_i64())
         .ok_or("Missing duration_minutes")?;
-    let earliest = parse_dt(input, "earliest")?;
-    let latest = parse_dt(input, "latest")?;
+    let tz: Tz = ctx
+        .profile
+        .timezone
+        .parse()
+        .map_err(|_| format!("Invalid profile timezone: {}", ctx.profile.timezone))?;
+    let (earliest, latest, date_corrected) = snap_to_weekday(
+        input,
+        parse_dt(input, "earliest")?,
+        parse_dt(input, "latest")?,
+        tz,
+        Utc::now(),
+    );
     let cfg = ctx
         .state
         .google_oauth
@@ -211,12 +233,6 @@ async fn suggest_slots(ctx: &ToolContext<'_>, input: &Value) -> Result<Value, St
     )
     .await
     .map_err(|e| e.to_string())?;
-
-    let tz: Tz = ctx
-        .profile
-        .timezone
-        .parse()
-        .map_err(|_| format!("Invalid profile timezone: {}", ctx.profile.timezone))?;
 
     let slots = find_open_slots(
         earliest,
@@ -240,10 +256,14 @@ async fn suggest_slots(ctx: &ToolContext<'_>, input: &Value) -> Result<Value, St
         })
         .collect();
 
-    Ok(json!({
+    let mut result = json!({
         "timezone": ctx.profile.timezone,
         "slots": slots_json,
-    }))
+    });
+    if let Some(note) = date_corrected {
+        result["date_corrected"] = json!(note);
+    }
+    Ok(result)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -521,29 +541,65 @@ fn check_weekday(
     tz: Tz,
     now: DateTime<Utc>,
 ) -> Result<(), String> {
-    let Some(wanted) = input
+    match weekday_mismatch(input, start, tz, now) {
+        None => Ok(()),
+        Some((given, next)) => Err(format!(
+            "{} is a {}, not a {}. The next {} is {}. Nothing was checked or booked. \
+             Use that date instead, and tell the caller the correct date.",
+            given.format("%B %-d, %Y"),
+            given.format("%A"),
+            next.format("%A"),
+            next.format("%A"),
+            next.format("%B %-d, %Y (%Y-%m-%d)"),
+        )),
+    }
+}
+
+/// The read-only tools' counterpart of [`check_weekday`]: instead of refusing
+/// a window on the wrong day, move it (same times) to the weekday the caller
+/// asked for and say so, because a refusal was read back to callers as
+/// "nothing is free that day".
+fn snap_to_weekday(
+    input: &Value,
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+    tz: Tz,
+    now: DateTime<Utc>,
+) -> (DateTime<Utc>, DateTime<Utc>, Option<String>) {
+    let Some((given, next)) = weekday_mismatch(input, start, tz, now) else {
+        return (start, end, None);
+    };
+    let shift = Duration::days((next - given).num_days());
+    let note = format!(
+        "You asked about {} but gave {}, which is a {}. The window was moved to {}; \
+         tell the caller that date, not the one you gave.",
+        next.format("%A"),
+        given.format("%B %-d, %Y"),
+        given.format("%A"),
+        next.format("%A, %B %-d, %Y"),
+    );
+    (start + shift, end + shift, Some(note))
+}
+
+/// When `start_weekday` names a day and `start` falls on another, the date
+/// that was given and the next date that really is that weekday.
+fn weekday_mismatch(
+    input: &Value,
+    start: DateTime<Utc>,
+    tz: Tz,
+    now: DateTime<Utc>,
+) -> Option<(chrono::NaiveDate, chrono::NaiveDate)> {
+    let wanted = input
         .get("start_weekday")
         .and_then(|v| v.as_str())
-        .and_then(|s| s.trim().parse::<Weekday>().ok())
-    else {
-        return Ok(());
-    };
-    let local = start.with_timezone(&tz);
-    if local.weekday() == wanted {
-        return Ok(());
+        .and_then(|s| s.trim().parse::<Weekday>().ok())?;
+    let given = start.with_timezone(&tz).date_naive();
+    if given.weekday() == wanted {
+        return None;
     }
     let today = now.with_timezone(&tz).date_naive();
     let ahead = (7 + wanted.num_days_from_monday() - today.weekday().num_days_from_monday()) % 7;
-    let next = today + Days::new(u64::from(ahead));
-    Err(format!(
-        "{} is a {}, not a {}. The next {} is {}. Nothing was checked or booked. \
-         Use that date instead, and tell the caller the correct date.",
-        local.format("%B %-d, %Y"),
-        local.format("%A"),
-        next.format("%A"),
-        next.format("%A"),
-        next.format("%B %-d, %Y (%Y-%m-%d)"),
-    ))
+    Some((given, today + Days::new(u64::from(ahead))))
 }
 
 fn parse_dt(input: &Value, key: &str) -> Result<DateTime<Utc>, String> {
@@ -646,6 +702,49 @@ mod weekday_tests {
         assert!(
             err.contains("The next Friday is October 9, 2026 (2026-10-09)"),
             "{err}"
+        );
+    }
+
+    #[test]
+    fn read_only_tools_move_the_window_to_the_asked_weekday() {
+        let tz = chrono_tz::America::Los_Angeles;
+        let now = at(2026, 10, 5, 20);
+        // Saturday Oct 10, 9:00-18:00 PT asked as "Friday" -> Friday Oct 9, same times.
+        let (start, end, note) = snap_to_weekday(
+            &json!({ "start_weekday": "Friday" }),
+            at(2026, 10, 10, 16),
+            at(2026, 10, 11, 1),
+            tz,
+            now,
+        );
+        assert_eq!(start, at(2026, 10, 9, 16));
+        assert_eq!(end, at(2026, 10, 10, 1));
+        let note = note.expect("a correction note");
+        assert!(
+            note.contains("gave October 10, 2026, which is a Saturday"),
+            "{note}"
+        );
+        assert!(note.contains("moved to Friday, October 9, 2026"), "{note}");
+
+        // Matching or absent weekday: untouched, no note.
+        let (s, e, n) = snap_to_weekday(
+            &json!({ "start_weekday": "Friday" }),
+            at(2026, 10, 9, 16),
+            at(2026, 10, 9, 17),
+            tz,
+            now,
+        );
+        assert_eq!((s, e, n), (at(2026, 10, 9, 16), at(2026, 10, 9, 17), None));
+        let (s, e, n) = snap_to_weekday(
+            &json!({}),
+            at(2026, 10, 10, 16),
+            at(2026, 10, 10, 17),
+            tz,
+            now,
+        );
+        assert_eq!(
+            (s, e, n),
+            (at(2026, 10, 10, 16), at(2026, 10, 10, 17), None)
         );
     }
 

@@ -17,6 +17,10 @@ const SPOKEN_ONLY_PROMPT: &str = " Everything you write is spoken aloud to the c
 /// reaching a tool call, for the single retry of that turn.
 pub const NO_NARRATION_RETRY: &str = "\n\nIMPORTANT: your previous attempt at this reply was discarded because it narrated your reasoning and ran too long. Do not explain your steps. Either call the tool you need now with no accompanying text, or answer the caller in one or two short sentences.";
 
+/// Appended to the system prompt for the text-only completion that closes a
+/// turn whose tool-round budget ran out.
+pub const OUT_OF_TOOL_ROUNDS: &str = "\n\nIMPORTANT: you have used all the tool calls allowed for this turn. Do not plan further lookups. Answer the caller now in one or two short sentences from what the tools already returned: offer the free times you found, or ask one question that moves things forward.";
+
 /// How many days, starting today, the system prompt lists by weekday and date.
 const UPCOMING_DAYS: u64 = 14;
 

@@ -1167,7 +1167,38 @@ async fn run_tool_loop(
         conv.push(llm::Message::ToolResults(results));
     }
 
-    Err("Exceeded maximum tool-use rounds".into())
+    // Out of tool rounds (seen when the model probes free slots one by one).
+    // Rather than leave the caller in silence, ask for a spoken answer from
+    // what the tools returned so far, with no tools on offer this time.
+    tracing::warn!("Call {call_sid} used all {MAX_ROUNDS} tool rounds; asking for a spoken answer");
+    let conv_snapshot = conversation.lock().await.clone();
+    let wrap_up_prompt = format!("{system_prompt}{}", assistant::OUT_OF_TOOL_ROUNDS);
+    let mut completion = assistant::respond_with_tools(
+        state.llm.as_ref(),
+        &wrap_up_prompt,
+        &conv_snapshot,
+        profile,
+        &[],
+    )
+    .await?;
+    if let Some(u) = completion.usage {
+        input_tokens += u.input_tokens;
+        output_tokens += u.output_tokens;
+    }
+    if completion.truncated {
+        completion.text = first_sentence(&completion.text).to_string();
+    }
+    conversation
+        .lock()
+        .await
+        .push(llm::Message::assistant_text(completion.text.clone()));
+    Ok(TurnOutput {
+        text: completion.text,
+        hang_up,
+        input_tokens,
+        output_tokens,
+        tool_rounds: MAX_ROUNDS as u32,
+    })
 }
 
 #[cfg(test)]
