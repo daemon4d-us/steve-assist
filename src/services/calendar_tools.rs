@@ -350,6 +350,14 @@ async fn book_meeting(ctx: &ToolContext<'_>, input: &Value) -> Result<Value, Str
     let end = parse_dt(input, "end")?;
     let tz: Tz = ctx.profile.timezone.parse().unwrap_or(chrono_tz::UTC);
     check_weekday(input, start, tz, Utc::now())?;
+    if let Some(mut earlier) = already_booked(ctx.history, start, end) {
+        earlier["status"] = json!("already_booked");
+        earlier["next_step"] = json!(
+            "This slot was already booked earlier in this call; no second event was \
+             created. Tell the caller it is booked."
+        );
+        return Ok(earlier);
+    }
     if !caller_confirmed(ctx.history, input, start, end) {
         return Ok(json!({
             "status": "needs_confirmation",
@@ -434,10 +442,33 @@ async fn book_meeting(ctx: &ToolContext<'_>, input: &Value) -> Result<Value, Str
     Ok(json!({
         "status": "booked",
         "when": spoken_dt(start, tz),
+        "start": start.to_rfc3339(),
+        "end": end.to_rfc3339(),
         "event_id": booked.id,
         "html_link": booked.html_link,
         "invited": attendee_email.is_some(),
+        "next_step": "The event exists now. Tell the caller it is booked, with the day and \
+            time. Do not ask them to confirm again.",
     }))
+}
+
+/// The `booked` result of an earlier `book_meeting` call in this call for the
+/// same slot, if any. A model that misreads its own booking as still pending
+/// asks the caller again and then calls the tool again; answering from the
+/// history keeps that from creating a second event.
+fn already_booked(history: &[Message], start: DateTime<Utc>, end: DateTime<Utc>) -> Option<Value> {
+    history.iter().rev().find_map(|msg| match msg {
+        Message::ToolResults(results) => results
+            .iter()
+            .filter(|r| r.name == "book_meeting")
+            .filter_map(|r| serde_json::from_str::<Value>(&r.content).ok())
+            .find(|v| {
+                v.get("status").and_then(|s| s.as_str()) == Some("booked")
+                    && parse_dt(v, "start").ok() == Some(start)
+                    && parse_dt(v, "end").ok() == Some(end)
+            }),
+        _ => None,
+    })
 }
 
 /// Models book the moment a caller picks a slot, skipping the read-back the
@@ -717,6 +748,42 @@ mod confirmation_tests {
             Message::User("no, 9:30 please".into()),
         ];
         assert!(!confirmed_now(&history));
+    }
+
+    #[test]
+    fn a_slot_booked_earlier_in_the_call_is_not_booked_twice() {
+        let booked = crate::services::llm::ToolResult {
+            call_id: "t2".into(),
+            name: "book_meeting".into(),
+            content: json!({
+                "status": "booked", "start": "2026-10-09T16:30:00+00:00",
+                "end": "2026-10-09T17:00:00+00:00", "event_id": "ev1"
+            })
+            .to_string(),
+        };
+        let pending = crate::services::llm::ToolResult {
+            call_id: "t1".into(),
+            name: "book_meeting".into(),
+            content: json!({ "status": "needs_confirmation", "start": START, "end": END })
+                .to_string(),
+        };
+        let input = json!({ "start": START, "end": END });
+        let start = parse_dt(&input, "start").unwrap();
+        let end = parse_dt(&input, "end").unwrap();
+
+        let history = [Message::ToolResults(vec![pending.clone()])];
+        assert!(already_booked(&history, start, end).is_none());
+
+        let history = [
+            Message::ToolResults(vec![pending]),
+            Message::User("yes".into()),
+            Message::ToolResults(vec![booked]),
+            Message::User("yes, book it".into()),
+        ];
+        let hit = already_booked(&history, start, end).expect("found the earlier booking");
+        assert_eq!(hit["event_id"], "ev1");
+        // A different slot is not covered by it.
+        assert!(already_booked(&history, start, start + Duration::minutes(45)).is_none());
     }
 
     #[test]
