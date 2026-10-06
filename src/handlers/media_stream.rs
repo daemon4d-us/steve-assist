@@ -205,7 +205,7 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
                                     match elevenlabs::text_to_speech(
                                         &state.elevenlabs_api_key,
                                         &active_voice,
-                                        &greeting,
+                                        &strip_markdown(&greeting),
                                     )
                                     .await
                                     {
@@ -387,7 +387,7 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
                                     match elevenlabs::text_to_speech(
                                         &state.elevenlabs_api_key,
                                         &active_voice,
-                                        &greeting,
+                                        &strip_markdown(&greeting),
                                     )
                                     .await
                                     {
@@ -925,7 +925,9 @@ fn first_sentence(text: &str) -> &str {
 }
 
 /// Strip markdown formatting that would be spoken literally by TTS.
-/// Handles: **bold**, *italic*, _underscore_, `code`, # headings, - / * bullet lines.
+/// Handles: **bold**, *italic*, _underscore_, `code`, # headings, - / * / +
+/// and `1.` / `1)` list lines, and the dash in a time or number range
+/// ("9:30 AM - 10:00 AM" is read as "9:30 AM to 10:00 AM").
 fn strip_markdown(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     for line in input.lines() {
@@ -941,6 +943,8 @@ fn strip_markdown(input: &str) -> String {
             trimmed = rest;
         } else if let Some(rest) = trimmed.strip_prefix("+ ") {
             trimmed = rest;
+        } else {
+            trimmed = strip_list_number(trimmed);
         }
         let trimmed = trimmed.trim_start();
 
@@ -955,7 +959,67 @@ fn strip_markdown(input: &str) -> String {
         out.push('\n');
     }
     // Collapse trailing whitespace/newlines
-    out.trim_end().to_string()
+    spell_out_ranges(out.trim_end())
+}
+
+/// "1. text" / "12) text" -> "text". A number followed by a space (a time, a
+/// price) is left alone, so "3. " is only a marker when the dot or paren
+/// comes right after the digits.
+fn strip_list_number(line: &str) -> &str {
+    let digits = line.len() - line.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+    if digits == 0 {
+        return line;
+    }
+    let rest = &line[digits..];
+    rest.strip_prefix(". ")
+        .or_else(|| rest.strip_prefix(") "))
+        .unwrap_or(line)
+}
+
+/// Replace a hyphen or en dash between two times or numbers with "to", so a
+/// slot like "9:30 AM - 10:00 AM" or "9–10" is spoken as a range. A dash with
+/// a word on either side ("Sure - one moment") is left as it is.
+fn spell_out_ranges(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '-' || c == '–' {
+            // The word before the dash: a number/time, or an AM/PM suffix.
+            let before: String = chars[..i]
+                .iter()
+                .rev()
+                .skip_while(|c| c.is_whitespace())
+                .take_while(|c| !c.is_whitespace())
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect();
+            let after = chars[i + 1..].iter().find(|c| !c.is_whitespace());
+            let lhs_ok = before.ends_with(|c: char| c.is_ascii_digit())
+                || matches!(
+                    before.to_ascii_lowercase().as_str(),
+                    "am" | "pm" | "a.m." | "p.m."
+                );
+            let rhs_ok = after.is_some_and(|c| c.is_ascii_digit());
+            if lhs_ok && rhs_ok {
+                // Drop the spaces around the dash so the spacing is uniform.
+                while out.ends_with(' ') {
+                    out.pop();
+                }
+                out.push_str(" to ");
+                i += 1;
+                while i < chars.len() && chars[i].is_whitespace() {
+                    i += 1;
+                }
+                continue;
+            }
+        }
+        out.push(c);
+        i += 1;
+    }
+    out
 }
 
 /// Result of one assistant turn: the spoken text plus accounting for metrics.
@@ -1097,5 +1161,36 @@ mod tests {
             "It costs 3.50 dollars"
         );
         assert_eq!(first_sentence(""), "");
+    }
+
+    #[test]
+    fn strip_markdown_turns_a_slot_list_into_spoken_ranges() {
+        let reply = "Here are some slots **this Friday**:\n\
+                     - 9:30 AM - 10:00 AM\n\
+                     - 11:45 AM – 12:15 PM\n\
+                     1. 12:45 PM - 1:15 PM\n\
+                     2) 9–10\n\n\
+                     Which works?";
+        assert_eq!(
+            strip_markdown(reply),
+            "Here are some slots this Friday:\n\
+             9:30 AM to 10:00 AM\n\
+             11:45 AM to 12:15 PM\n\
+             12:45 PM to 1:15 PM\n\
+             9 to 10\n\n\
+             Which works?"
+        );
+    }
+
+    #[test]
+    fn strip_markdown_leaves_ordinary_dashes_and_numbers_alone() {
+        assert_eq!(
+            strip_markdown("Sure - one moment. Room - 3 people. It is 3. Then 4 - five."),
+            "Sure - one moment. Room - 3 people. It is 3. Then 4 - five."
+        );
+        assert_eq!(strip_markdown("3. 50 dollars"), "50 dollars");
+        assert_eq!(strip_markdown("3.50 dollars"), "3.50 dollars");
+        assert_eq!(strip_markdown("## Hi `there`_!_"), "Hi there!");
+        assert_eq!(strip_markdown("a - 1"), "a - 1");
     }
 }
