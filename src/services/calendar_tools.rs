@@ -6,6 +6,7 @@ use serde_json::{Value, json};
 
 use crate::services::db::{self, AgentProfile, BookingRecord};
 use crate::services::google_calendar::{self, BusyInterval};
+use crate::services::llm::Message;
 use crate::state::AppState;
 
 /// Returns the list of LLM tool definitions if calendar access is configured
@@ -75,10 +76,13 @@ fn build_tool_definitions() -> Vec<crate::services::llm::Tool> {
         },
         Tool {
             name: "book_meeting".to_string(),
-            description: "Create a calendar event on the owner's personal calendar. Only call \
-                this AFTER verbally confirming the exact date, time, duration, and title with \
-                the caller. If the caller provided an email address, pass it as attendee_email \
-                so they receive an invite."
+            description: "Create a calendar event on the owner's personal calendar. Booking \
+                takes two calls: the first call for a slot never books, it returns \
+                needs_confirmation with the date and time to repeat to the caller. Repeat them \
+                with the title, ask whether that is right, and only after the caller has said \
+                yes call it again with the same start and end and caller_confirmed set to \
+                true. If the caller provided an email address, pass it as attendee_email so \
+                they receive an invite."
                 .to_string(),
             input_schema: json!({
                 "type": "object",
@@ -98,6 +102,10 @@ fn build_tool_definitions() -> Vec<crate::services::llm::Tool> {
                     "start_weekday": {
                         "type": "string",
                         "description": "Day of the week the caller asked for, e.g. Friday. The call is rejected if start does not fall on that day"
+                    },
+                    "caller_confirmed": {
+                        "type": "boolean",
+                        "description": "true only when the caller has said yes, in a later turn, to the exact date, time and title you repeated to them after the first call returned needs_confirmation"
                     },
                     "description": {
                         "type": "string",
@@ -119,6 +127,10 @@ pub struct ToolContext<'a> {
     pub profile: &'a AgentProfile,
     pub call_sid: &'a str,
     pub caller_phone: &'a str,
+    /// The conversation so far, up to and including the current turn's
+    /// earlier tool rounds. `book_meeting` reads it to tell whether the caller
+    /// has had a chance to confirm.
+    pub history: &'a [Message],
 }
 
 /// Execute a tool call. Always returns a JSON value to send back as tool_result.
@@ -338,6 +350,17 @@ async fn book_meeting(ctx: &ToolContext<'_>, input: &Value) -> Result<Value, Str
     let end = parse_dt(input, "end")?;
     let tz: Tz = ctx.profile.timezone.parse().unwrap_or(chrono_tz::UTC);
     check_weekday(input, start, tz, Utc::now())?;
+    if !caller_confirmed(ctx.history, input, start, end) {
+        return Ok(json!({
+            "status": "needs_confirmation",
+            "title": title,
+            "when": spoken_dt(start, tz),
+            "end_time": end.with_timezone(&tz).format("%-I:%M %p").to_string(),
+            "next_step": "Nothing was booked. Repeat this date, time and title to the caller \
+                and ask whether that is right. Once they say yes, call book_meeting again \
+                with the same start and end and caller_confirmed set to true.",
+        }));
+    }
     let description = input
         .get("description")
         .and_then(|v| v.as_str())
@@ -415,6 +438,38 @@ async fn book_meeting(ctx: &ToolContext<'_>, input: &Value) -> Result<Value, Str
         "html_link": booked.html_link,
         "invited": attendee_email.is_some(),
     }))
+}
+
+/// Models book the moment a caller picks a slot, skipping the read-back the
+/// scheduling rules ask for, and `caller_confirmed: true` alone is only a
+/// claim. The history settles it: the booking goes ahead only if an earlier
+/// `book_meeting` call for the same start and end (the proposal) was followed
+/// by something the caller said, i.e. the model had to speak the details and
+/// wait for an answer before calling again.
+fn caller_confirmed(
+    history: &[Message],
+    input: &Value,
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+) -> bool {
+    if input.get("caller_confirmed").and_then(|v| v.as_bool()) != Some(true) {
+        return false;
+    }
+    let mut proposed = false;
+    for msg in history {
+        match msg {
+            Message::ToolCalls { calls, .. } => {
+                proposed |= calls.iter().any(|c| {
+                    c.name == "book_meeting"
+                        && parse_dt(&c.input, "start").ok() == Some(start)
+                        && parse_dt(&c.input, "end").ok() == Some(end)
+                });
+            }
+            Message::User(_) if proposed => return true,
+            _ => {}
+        }
+    }
+    false
 }
 
 /// A tool-result date the model can read back to the caller as is, weekday
@@ -498,7 +553,9 @@ pub fn build_calendar_context(profile: &AgentProfile, tools_available: bool) -> 
         "\nScheduling rules:\n\
          - Use check_availability or suggest_meeting_slots before proposing times.\n\
          - Never book a meeting without first verbally confirming the exact date, time, \
-           and title with the caller. Repeat the details back and wait for their yes.\n\
+           and title with the caller. Repeat the details back and wait for their yes. \
+           book_meeting enforces this: its first call for a slot only returns the details \
+           to confirm, and it books on a second call with caller_confirmed true.\n\
          - If the caller gives an email, pass it as attendee_email so they get an invite.\n\
          - Only book on the personal calendar.\n\
          - Your responses are spoken aloud by a voice model. Respond in plain \
@@ -583,5 +640,92 @@ mod weekday_tests {
             spoken_dt(at(2026, 10, 10, 2), tz),
             "Friday, October 9, 2026, 7:00 PM"
         );
+    }
+}
+
+#[cfg(test)]
+mod confirmation_tests {
+    use super::*;
+    use crate::services::llm::ToolCall;
+
+    const START: &str = "2026-10-09T09:30:00-07:00";
+    const END: &str = "2026-10-09T10:00:00-07:00";
+
+    fn book_call(start: &str, end: &str, confirmed: bool) -> Message {
+        Message::ToolCalls {
+            text: String::new(),
+            calls: vec![ToolCall {
+                id: "t1".into(),
+                name: "book_meeting".into(),
+                input: json!({ "title": "Test", "start": start, "end": end, "caller_confirmed": confirmed }),
+            }],
+        }
+    }
+
+    fn confirmed_now(history: &[Message]) -> bool {
+        let input = json!({ "start": START, "end": END, "caller_confirmed": true });
+        let start = parse_dt(&input, "start").unwrap();
+        let end = parse_dt(&input, "end").unwrap();
+        caller_confirmed(history, &input, start, end)
+    }
+
+    #[test]
+    fn first_call_never_books_even_if_the_model_claims_confirmation() {
+        let history = [Message::User("the first one works".into())];
+        assert!(!confirmed_now(&history));
+        assert!(!caller_confirmed(
+            &history,
+            &json!({ "caller_confirmed": false }),
+            parse_dt(&json!({ "s": START }), "s").unwrap(),
+            parse_dt(&json!({ "e": END }), "e").unwrap(),
+        ));
+    }
+
+    #[test]
+    fn a_second_call_in_the_same_turn_does_not_count() {
+        // Proposal and "confirmed" call in consecutive tool rounds, no caller in between.
+        let history = [
+            Message::User("the first one works".into()),
+            book_call(START, END, false),
+            Message::ToolResults(vec![]),
+        ];
+        assert!(!confirmed_now(&history));
+    }
+
+    #[test]
+    fn books_once_the_caller_has_spoken_after_the_proposal() {
+        let history = [
+            Message::User("the first one works".into()),
+            book_call(START, END, false),
+            Message::ToolResults(vec![]),
+            Message::Assistant("That is Friday, October 9 at 9:30. Shall I book it?".into()),
+            Message::User("yes, go ahead".into()),
+        ];
+        assert!(confirmed_now(&history));
+    }
+
+    #[test]
+    fn a_proposal_for_a_different_slot_does_not_count() {
+        let history = [
+            book_call(
+                "2026-10-09T10:00:00-07:00",
+                "2026-10-09T10:30:00-07:00",
+                false,
+            ),
+            Message::ToolResults(vec![]),
+            Message::Assistant("Friday at 10?".into()),
+            Message::User("no, 9:30 please".into()),
+        ];
+        assert!(!confirmed_now(&history));
+    }
+
+    #[test]
+    fn the_same_instant_in_another_offset_still_matches() {
+        let history = [
+            book_call("2026-10-09T16:30:00Z", "2026-10-09T17:00:00Z", false),
+            Message::ToolResults(vec![]),
+            Message::User("yes".into()),
+        ];
+        assert!(confirmed_now(&history));
     }
 }

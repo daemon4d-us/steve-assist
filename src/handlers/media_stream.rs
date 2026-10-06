@@ -1047,15 +1047,15 @@ async fn run_tool_loop(
     let mut output_tokens = 0u32;
     let mut hang_up = false;
 
-    let ctx = calendar_tools::ToolContext {
-        state,
-        profile: &state.agent_profile,
-        call_sid,
-        caller_phone,
-    };
-
     for round in 0..MAX_ROUNDS {
         let conv_snapshot = conversation.lock().await.clone();
+        let ctx = calendar_tools::ToolContext {
+            state,
+            profile: &state.agent_profile,
+            call_sid,
+            caller_phone,
+            history: &conv_snapshot,
+        };
 
         let mut completion = assistant::respond_with_tools(
             state.llm.as_ref(),
